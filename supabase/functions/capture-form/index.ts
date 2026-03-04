@@ -274,12 +274,12 @@ function renderHTML(
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
-  const HEADERS = { "Content-Type": "text/html; charset=utf-8" }
+  const HEADERS = new Headers(); HEADERS.set("Content-Type", "text/html; charset=utf-8");
 
   // --- GET: serve the login form ---
   if (req.method === "GET") {
     return new Response(renderHTML(undefined, false), {
-      headers: HEADERS,
+      status: 200, headers: HEADERS,
     });
   }
 
@@ -293,14 +293,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Auth check
     if (secret !== CAPTURE_SECRET) {
       return new Response(renderHTML(undefined, false), {
-        headers: HEADERS,
+        status: 200, headers: HEADERS,
       });
     }
 
     // If no thought, they just authenticated — show the capture form
     if (!thought.trim()) {
       return new Response(renderHTML(undefined, true), {
-        headers: HEADERS,
+        status: 200, headers: HEADERS,
       });
     }
 
@@ -337,13 +337,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
       if (error) {
         return new Response(
           renderHTML({ success: false, error: error.message }, true),
-          { headers: HEADERS }
+          { status: 200, headers: HEADERS }
         );
       }
 
       return new Response(
         renderHTML({ success: true, thought, metadata }, true),
-        { headers: HEADERS }
+        { status: 200, headers: HEADERS }
       );
     } catch (err) {
       return new Response(
@@ -354,7 +354,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           },
           true
         ),
-        { headers: HEADERS }
+        { status: 200, headers: HEADERS }
       );
     }
   }
