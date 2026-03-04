@@ -177,6 +177,42 @@ create policy "Service role full access on access_keys"
   using (auth.role() = 'service_role');
 ```
 
+#### Create the Tag Rules Table
+
+This table defines deterministic rules that run *after* the LLM classifies a thought's visibility. If a thought has a given tag, another tag is automatically removed. This is a privacy safety net — the LLM might tag something as both `romance` and `sfw`, but the rule engine will strip `sfw` before storage.
+
+New query → paste and Run:
+
+```sql
+-- Deterministic tag implication rules.
+-- If a thought has if_present, then remove_tag is stripped from visibility.
+create table tag_rules (
+  id uuid primary key default gen_random_uuid(),
+  if_present text not null,    -- tag that triggers the rule
+  remove_tag text not null,    -- tag to remove when if_present is found
+  note text,                   -- human-readable explanation
+  active boolean not null default true,
+  unique(if_present, remove_tag)
+);
+
+-- RLS: service role only
+alter table tag_rules enable row level security;
+create policy "Service role full access on tag_rules"
+  on tag_rules for all
+  using (auth.role() = 'service_role');
+
+-- Seed the initial rules
+insert into tag_rules (if_present, remove_tag, note) values
+  ('romance',   'sfw', 'Romance content is not safe for work context'),
+  ('sexuality', 'sfw', 'Sexual content is not safe for work context'),
+  ('health',    'sfw', 'Health details are private by default'),
+  ('financial', 'sfw', 'Financial details are private by default');
+```
+
+> You can add, remove, or change rules at any time in the Supabase Table Editor or via SQL — no redeployment needed. The capture function reads the active rules on every submission.
+
+> **How it works:** After the LLM returns its metadata (including its best guess at visibility tags), the capture function fetches all active rules, then for each rule, if `if_present` is found in the visibility array, `remove_tag` is stripped. The LLM might tag a thought `["sfw", "personal", "romance"]` — the rule engine will deterministically produce `["personal", "romance"]` before storage. The MCP server's work key (filtering on `sfw`) will never see it.
+
 #### Create the Search Function
 
 New query → paste and Run:
@@ -264,7 +300,7 @@ create policy "Service role full access"
 
 #### Quick Verification
 
-**Table Editor** should show two tables: `thoughts` and `access_keys`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at. **Database → Functions** should show `match_thoughts` and `validate_access_key`.
+**Table Editor** should show three tables: `thoughts`, `access_keys`, and `tag_rules`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts` and `validate_access_key`.
 
 ---
 
@@ -438,6 +474,26 @@ Only extract what's explicitly there.`,
       visibility: ["sfw"],
     };
   }
+}
+
+async function applyTagRules(
+  visibility: string[]
+): Promise<string[]> {
+  // Fetch active rules from the database
+  const { data: rules, error } = await supabase
+    .from("tag_rules")
+    .select("if_present, remove_tag")
+    .eq("active", true);
+
+  if (error || !rules || rules.length === 0) return visibility;
+
+  let result = [...visibility];
+  for (const rule of rules) {
+    if (result.includes(rule.if_present)) {
+      result = result.filter((tag: string) => tag !== rule.remove_tag);
+    }
+  }
+  return result;
 }
 
 function escapeHtml(s: string): string {
@@ -669,6 +725,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
           .filter(Boolean);
       }
 
+      // Apply deterministic tag rules (e.g., romance removes sfw)
+      if (Array.isArray(metadata.visibility)) {
+        metadata.visibility = await applyTagRules(
+          metadata.visibility as string[]
+        );
+      }
+
       const { error } = await supabase.from("thoughts").insert({
         content: thought,
         embedding,
@@ -748,7 +811,15 @@ Action items: Check in with Sarah about consulting plans
 
 6. Open Supabase dashboard → **Table Editor → thoughts**. You should see one row with your message, an embedding, metadata including the `visibility` array, `submitted_by` set to `user`, and `evidence_basis` set to `user typed in web form`.
 
-> If that works, Part 1 is done. You have a working private capture system.
+> If that works, try a second thought to verify tag rules are working:
+
+```
+I've been having some chest pain when I exercise and need to schedule a doctor visit
+```
+
+The LLM should classify this with `health` in visibility. The tag rule engine should then strip `sfw` (if the LLM included it). Check that the confirmation shows visibility without `sfw`. If it does, the rule engine is working.
+
+> If both tests pass, Part 1 is done. You have a working private capture system with deterministic privacy enforcement.
 
 ---
 
@@ -1261,6 +1332,67 @@ update access_keys set active = false where name = 'work-copilot';
 ```sql
 delete from access_keys where name = 'old-agent';
 ```
+
+---
+
+## Managing Tag Rules
+
+Tag rules are your deterministic privacy safety net. They run after every LLM classification, so even if the model tags something as `sfw` when it shouldn't be, the rule engine will catch it.
+
+### See current rules
+
+```sql
+select if_present, remove_tag, note, active from tag_rules order by if_present;
+```
+
+### Add a new rule
+
+```sql
+insert into tag_rules (if_present, remove_tag, note) values
+  ('relationship', 'sfw', 'Relationship details are private');
+```
+
+### Temporarily disable a rule
+
+```sql
+update tag_rules set active = false
+where if_present = 'health' and remove_tag = 'sfw';
+```
+
+### Delete a rule
+
+```sql
+delete from tag_rules
+where if_present = 'financial' and remove_tag = 'sfw';
+```
+
+### Seeded defaults
+
+The setup script seeds these rules:
+
+| If present | Removes | Rationale |
+|---|---|---|
+| `romance` | `sfw` | Romance content is not safe for work context |
+| `sexuality` | `sfw` | Sexual content is not safe for work context |
+| `health` | `sfw` | Health details are private by default |
+| `financial` | `sfw` | Financial details are private by default |
+
+You can change these to match your own privacy boundaries. The rules are read from the database on every capture, so changes take effect immediately — no redeployment needed.
+
+> **Note:** Tag rules apply at capture time. They don't retroactively change thoughts already in the database. If you add a new rule and want it to apply to existing thoughts, you'll need to run an update query. For example, after adding a rule that `relationship` removes `sfw`:
+>
+> ```sql
+> update thoughts
+> set metadata = jsonb_set(
+>   metadata,
+>   '{visibility}',
+>   (select jsonb_agg(elem)
+>    from jsonb_array_elements_text(metadata->'visibility') as elem
+>    where elem != 'sfw')
+> )
+> where metadata->'visibility' ? 'relationship'
+>   and metadata->'visibility' ? 'sfw';
+> ```
 
 ---
 
