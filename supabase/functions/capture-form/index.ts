@@ -103,7 +103,7 @@ function renderHTML(
     error?: string;
   },
   authed = false
-): string {
+): Blob {
   const resultHTML = result
     ? result.success
       ? `<div class="result success">
@@ -166,7 +166,7 @@ function renderHTML(
          <button type="submit">Unlock</button>
        </form>`;
 
-  return `<!DOCTYPE html>
+    const full_html_str = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
@@ -270,6 +270,7 @@ function renderHTML(
   </script>
 </body>
 </html>`;
+    return new Blob([full_html_str], { type: "text/html; charset=utf-8" });
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
