@@ -62,8 +62,9 @@ OPENROUTER
   API key:            ____________  <- Step 4
 
 GENERATED DURING SETUP
-  Capture Form URL:   ____________  <- Step 7
-  Capture Form Secret:____________  <- Step 7
+  Capture API URL:    ____________  <- Step 7a
+  Capture Page URL:   ____________  <- Step 7b
+  Capture Form Secret:____________  <- Step 6
   MCP Server URL:     ____________  <- Step 10
   MCP Keys:           (managed in access_keys table — Step 9)
 
@@ -76,7 +77,7 @@ GENERATED DURING SETUP
 
 ## Two Parts
 
-**Part 1 — Capture (Steps 1–8):** Web Form → Edge Function → Supabase. Type a thought, it gets embedded and classified automatically, you see the result on screen.
+**Part 1 — Capture (Steps 1–8):** Static HTML page (Supabase Storage) → JSON API (Edge Function) → Supabase. Type a thought, it gets embedded and classified automatically, you see the result on screen.
 
 **Part 2 — Retrieval (Steps 9–12):** Hosted MCP Server → Any AI. Connect Claude, ChatGPT, or any MCP client to your brain with a URL and a key that controls what they can see.
 
@@ -392,17 +393,21 @@ Paste your chosen capture secret into the credential tracker.
 
 ---
 
-### Step 7: Deploy the Capture Form
+### Step 7: Deploy the Capture System
 
-> **Change from original guide:** This replaces the Slack app, the Slack bot token, the Event Subscriptions, and the `ingest-thought` Edge Function. One function serves the HTML form AND processes submissions.
+> **Change from original guide:** This replaces the Slack app, the Slack bot token, the Event Subscriptions, and the `ingest-thought` Edge Function. The capture system has two pieces: a JSON API (Edge Function) and a static HTML page (Supabase Storage). They're split because Supabase's gateway rewrites the `Content-Type` header to `text/plain` for Edge Function responses that try to return HTML — so the UI must be served from Storage, which preserves content types correctly.
 
-#### Create the Function
+#### Step 7a: Deploy the Capture API (Edge Function)
+
+This function accepts JSON, does the embedding/classification/tag-rule work, stores the thought, and returns JSON. No HTML.
+
+##### Create the Function
 
 ```bash
 supabase functions new capture-form
 ```
 
-#### Write the Code
+##### Write the Code
 
 Open `supabase/functions/capture-form/index.ts` and replace its entire contents with:
 
@@ -416,6 +421,12 @@ const CAPTURE_SECRET = Deno.env.get("CAPTURE_SECRET")!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, x-capture-secret",
+};
 
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
@@ -479,7 +490,6 @@ Only extract what's explicitly there.`,
 async function applyTagRules(
   visibility: string[]
 ): Promise<string[]> {
-  // Fetch active rules from the database
   const { data: rules, error } = await supabase
     .from("tag_rules")
     .select("if_present, remove_tag")
@@ -496,86 +506,126 @@ async function applyTagRules(
   return result;
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+Deno.serve(async (req: Request): Promise<Response> => {
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
 
-function renderHTML(
-  result?: {
-    success: boolean;
-    thought?: string;
-    metadata?: Record<string, unknown>;
-    error?: string;
-  },
-  authed = false
-): string {
-  const resultHTML = result
-    ? result.success
-      ? `<div class="result success">
-           <h3>&#10003; Captured</h3>
-           <p class="thought-echo">${escapeHtml(result.thought || "")}</p>
-           <div class="meta-grid">
-             <div class="meta-item"><span class="label">Type</span><span class="value">${
-               result.metadata?.type || "—"
-             }</span></div>
-             <div class="meta-item"><span class="label">Topics</span><span class="value">${
-               Array.isArray(result.metadata?.topics)
-                 ? (result.metadata!.topics as string[]).join(", ")
-                 : "—"
-             }</span></div>
-             <div class="meta-item"><span class="label">Visibility</span><span class="value">${
-               Array.isArray(result.metadata?.visibility)
-                 ? (result.metadata!.visibility as string[]).join(", ")
-                 : "—"
-             }</span></div>
-             ${
-               Array.isArray(result.metadata?.people) &&
-               (result.metadata!.people as string[]).length > 0
-                 ? `<div class="meta-item"><span class="label">People</span><span class="value">${(
-                     result.metadata!.people as string[]
-                   ).join(", ")}</span></div>`
-                 : ""
-             }
-             ${
-               Array.isArray(result.metadata?.action_items) &&
-               (result.metadata!.action_items as string[]).length > 0
-                 ? `<div class="meta-item"><span class="label">Action items</span><span class="value">${(
-                     result.metadata!.action_items as string[]
-                   ).join("; ")}</span></div>`
-                 : ""
-             }
-           </div>
-         </div>`
-      : `<div class="result error"><h3>&#10007; Error</h3><p>${escapeHtml(
-          result.error || "Unknown error"
-        )}</p></div>`
-    : "";
+  if (req.method !== "POST") {
+    return new Response(
+      JSON.stringify({ error: "Method not allowed" }),
+      { status: 405, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+    );
+  }
 
-  const formSection = authed
-    ? `<form method="POST" class="capture-form" id="captureForm">
-         <input type="hidden" name="secret" id="hiddenSecret" value="">
-         <textarea name="thought" placeholder="Type a thought..." rows="4" required autofocus></textarea>
-         <div class="form-row">
-           <label class="viz-label">Override visibility (optional):
-             <input type="text" name="visibility_override"
-                    placeholder="e.g. sfw, work, technical" />
-           </label>
-           <button type="submit">Capture</button>
-         </div>
-       </form>
-       ${resultHTML}
-       <div class="history-link"><a href="#" id="logoutLink">Lock</a></div>`
-    : `<form method="POST" class="login-form" id="loginForm">
-         <input type="password" name="secret" placeholder="Enter capture secret"
-                required autofocus />
-         <button type="submit">Unlock</button>
-       </form>`;
+  const headers = { ...CORS_HEADERS, "Content-Type": "application/json" };
 
-  return `<!DOCTYPE html>
+  try {
+    const body = await req.json();
+    const secret = body.secret || req.headers.get("x-capture-secret") || "";
+    const thought: string = body.thought || "";
+    const vizOverride: string = body.visibility_override || "";
+
+    // Auth check
+    if (secret !== CAPTURE_SECRET) {
+      return new Response(
+        JSON.stringify({ error: "Invalid secret" }),
+        { status: 401, headers }
+      );
+    }
+
+    if (!thought.trim()) {
+      return new Response(
+        JSON.stringify({ error: "No thought provided" }),
+        { status: 400, headers }
+      );
+    }
+
+    // Embed and classify in parallel
+    const [embedding, metadata] = await Promise.all([
+      getEmbedding(thought),
+      extractMetadata(thought),
+    ]);
+
+    // Apply visibility override if provided
+    if (vizOverride.trim()) {
+      metadata.visibility = vizOverride
+        .split(",")
+        .map((s: string) => s.trim().toLowerCase())
+        .filter(Boolean);
+    }
+
+    // Apply deterministic tag rules (e.g., romance removes sfw)
+    if (Array.isArray(metadata.visibility)) {
+      metadata.visibility = await applyTagRules(
+        metadata.visibility as string[]
+      );
+    }
+
+    const { error } = await supabase.from("thoughts").insert({
+      content: thought,
+      embedding,
+      metadata: { ...metadata, source: "web-form" },
+      submitted_by: "user",
+      evidence_basis: "user typed in web form",
+    });
+
+    if (error) {
+      return new Response(
+        JSON.stringify({ success: false, error: error.message }),
+        { status: 500, headers }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({ success: true, thought, metadata }),
+      { status: 200, headers }
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: err instanceof Error ? err.message : "Unknown error",
+      }),
+      { status: 500, headers }
+    );
+  }
+});
+```
+
+##### Deploy
+
+```bash
+supabase functions deploy capture-form --no-verify-jwt
+```
+
+The API endpoint is:
+
+```
+https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form
+```
+
+Paste this into your credential tracker as the **Capture API URL**. You won't open this URL in a browser — the static page calls it.
+
+#### Step 7b: Upload the Capture Page (Supabase Storage)
+
+The HTML form lives in Supabase Storage, which serves files with the correct `Content-Type` headers.
+
+##### Create a Storage Bucket
+
+1. In the Supabase dashboard, go to **Storage** in the left sidebar
+2. Click **New bucket**
+3. Name it `public-site`
+4. Toggle **Public bucket** ON
+5. Click **Create bucket**
+
+##### Create the HTML File
+
+Create a file called `capture.html` on your computer with the following contents. **Before saving**, replace `YOUR_PROJECT_REF` on the line that sets `API_URL` with your actual project ref from the credential tracker.
+
+```html
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
@@ -609,6 +659,7 @@ function renderHTML(
       border-radius: 6px; cursor: pointer; white-space: nowrap;
     }
     button:hover { background: #3a8eef; }
+    button:disabled { background: #555; cursor: not-allowed; }
     .form-row {
       display: flex; gap: 0.75rem; margin-top: 0.75rem;
       align-items: flex-end;
@@ -636,169 +687,234 @@ function renderHTML(
       text-transform: uppercase; letter-spacing: 0.05em;
     }
     .meta-item .value { font-size: 0.9rem; }
-    .history-link {
+    .footer-row {
       margin-top: 1.5rem; text-align: right; font-size: 0.85rem;
     }
-    .history-link a { color: #666; text-decoration: none; }
-    .history-link a:hover { color: #999; }
+    .footer-row a { color: #666; text-decoration: none; }
+    .footer-row a:hover { color: #999; }
+    .hidden { display: none; }
+    .spinner {
+      display: inline-block; width: 1em; height: 1em;
+      border: 2px solid #555; border-top-color: #4a9eff;
+      border-radius: 50%; animation: spin 0.6s linear infinite;
+      vertical-align: middle; margin-right: 0.4em;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Open Brain</h1>
-    ${formSection}
+
+    <!-- Login screen -->
+    <div id="loginSection">
+      <div class="login-form">
+        <input type="password" id="secretInput"
+               placeholder="Enter capture secret" autofocus />
+        <button id="unlockBtn">Unlock</button>
+      </div>
+    </div>
+
+    <!-- Capture screen (hidden until authenticated) -->
+    <div id="captureSection" class="hidden">
+      <textarea id="thoughtInput" placeholder="Type a thought..."
+                rows="4"></textarea>
+      <div class="form-row">
+        <label class="viz-label">Override visibility (optional):
+          <input type="text" id="vizOverride"
+                 placeholder="e.g. sfw, work, technical" />
+        </label>
+        <button id="captureBtn">Capture</button>
+      </div>
+      <div id="resultArea"></div>
+      <div class="footer-row"><a href="#" id="lockLink">Lock</a></div>
+    </div>
   </div>
+
   <script>
-    // Persist the secret in sessionStorage so the form keeps working across captures
-    const loginForm = document.getElementById('loginForm');
-    const captureForm = document.getElementById('captureForm');
-    const logoutLink = document.getElementById('logoutLink');
+    // ---- CONFIGURATION ----
+    // Replace YOUR_PROJECT_REF with your Supabase project ref.
+    const API_URL =
+      "https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form";
 
-    if (loginForm) {
-      loginForm.addEventListener('submit', function() {
-        const pw = loginForm.querySelector('input[type="password"]');
-        if (pw) sessionStorage.setItem('ob_secret', pw.value);
-      });
+    // ---- STATE ----
+    function getSecret() { return sessionStorage.getItem("ob_secret") || ""; }
+    function setSecret(s) { sessionStorage.setItem("ob_secret", s); }
+    function clearSecret() { sessionStorage.removeItem("ob_secret"); }
+
+    // ---- ELEMENTS ----
+    const loginSection   = document.getElementById("loginSection");
+    const captureSection = document.getElementById("captureSection");
+    const secretInput    = document.getElementById("secretInput");
+    const unlockBtn      = document.getElementById("unlockBtn");
+    const thoughtInput   = document.getElementById("thoughtInput");
+    const vizOverride    = document.getElementById("vizOverride");
+    const captureBtn     = document.getElementById("captureBtn");
+    const resultArea     = document.getElementById("resultArea");
+    const lockLink       = document.getElementById("lockLink");
+
+    // ---- SCREEN SWITCHING ----
+    function showCapture() {
+      loginSection.classList.add("hidden");
+      captureSection.classList.remove("hidden");
+      thoughtInput.focus();
+    }
+    function showLogin() {
+      captureSection.classList.add("hidden");
+      loginSection.classList.remove("hidden");
+      secretInput.value = "";
+      secretInput.focus();
     }
 
-    if (captureForm) {
-      const hidden = document.getElementById('hiddenSecret');
-      if (hidden) hidden.value = sessionStorage.getItem('ob_secret') || '';
-      captureForm.addEventListener('submit', function() {
-        if (hidden) hidden.value = sessionStorage.getItem('ob_secret') || '';
-      });
+    // If secret is already in session, skip login
+    if (getSecret()) showCapture();
+
+    // ---- LOGIN ----
+    unlockBtn.addEventListener("click", () => {
+      const s = secretInput.value.trim();
+      if (!s) return;
+      setSecret(s);
+      showCapture();
+    });
+    secretInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") unlockBtn.click();
+    });
+
+    // ---- LOCK ----
+    lockLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      clearSecret();
+      resultArea.innerHTML = "";
+      showLogin();
+    });
+
+    // ---- CAPTURE ----
+    captureBtn.addEventListener("click", async () => {
+      const thought = thoughtInput.value.trim();
+      if (!thought) return;
+
+      captureBtn.disabled = true;
+      captureBtn.innerHTML = '<span class="spinner"></span>Capturing…';
+      resultArea.innerHTML = "";
+
+      try {
+        const resp = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            secret: getSecret(),
+            thought: thought,
+            visibility_override: vizOverride.value.trim(),
+          }),
+        });
+
+        const data = await resp.json();
+
+        if (resp.status === 401) {
+          // Bad secret — force re-login
+          clearSecret();
+          resultArea.innerHTML = renderError("Invalid secret. Please unlock again.");
+          showLogin();
+          return;
+        }
+
+        if (!resp.ok || !data.success) {
+          resultArea.innerHTML = renderError(data.error || "Unknown error");
+          return;
+        }
+
+        // Success
+        resultArea.innerHTML = renderSuccess(thought, data.metadata);
+        thoughtInput.value = "";
+        vizOverride.value = "";
+        thoughtInput.focus();
+
+      } catch (err) {
+        resultArea.innerHTML = renderError(
+          "Network error — is the Edge Function deployed? " + err.message
+        );
+      } finally {
+        captureBtn.disabled = false;
+        captureBtn.textContent = "Capture";
+      }
+    });
+
+    // Ctrl/Cmd+Enter to submit
+    thoughtInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) captureBtn.click();
+    });
+
+    // ---- RENDERERS ----
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
     }
 
-    if (logoutLink) {
-      logoutLink.addEventListener('click', function(e) {
-        e.preventDefault();
-        sessionStorage.removeItem('ob_secret');
-        window.location.reload();
-      });
+    function renderSuccess(thought, meta) {
+      let html = '<div class="result success"><h3>&#10003; Captured</h3>';
+      html += '<p class="thought-echo">' + esc(thought) + "</p>";
+      html += '<div class="meta-grid">';
+      html += metaItem("Type", meta.type);
+      html += metaItem("Topics", arr(meta.topics));
+      html += metaItem("Visibility", arr(meta.visibility));
+      if (meta.people && meta.people.length)
+        html += metaItem("People", arr(meta.people));
+      if (meta.action_items && meta.action_items.length)
+        html += metaItem("Action items", meta.action_items.join("; "));
+      html += "</div></div>";
+      return html;
+    }
+
+    function renderError(msg) {
+      return '<div class="result error"><h3>&#10007; Error</h3><p>'
+        + esc(msg) + "</p></div>";
+    }
+
+    function metaItem(label, value) {
+      return '<div class="meta-item"><span class="label">'
+        + esc(label) + '</span><span class="value">'
+        + esc(value || "—") + "</span></div>";
+    }
+
+    function arr(a) {
+      return Array.isArray(a) ? a.join(", ") : (a || "—");
     }
   </script>
 </body>
-</html>`;
-}
-
-Deno.serve(async (req: Request): Promise<Response> => {
-  // --- GET: serve the login form ---
-  if (req.method === "GET") {
-    return new Response(renderHTML(undefined, false), {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
-  }
-
-  // --- POST: authenticate or capture ---
-  if (req.method === "POST") {
-    const formData = await req.formData();
-    const secret = formData.get("secret")?.toString() || "";
-    const thought = formData.get("thought")?.toString() || "";
-    const vizOverride = formData.get("visibility_override")?.toString() || "";
-
-    // Auth check
-    if (secret !== CAPTURE_SECRET) {
-      return new Response(renderHTML(undefined, false), {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
-    }
-
-    // If no thought, they just authenticated — show the capture form
-    if (!thought.trim()) {
-      return new Response(renderHTML(undefined, true), {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-      });
-    }
-
-    // --- Capture the thought ---
-    try {
-      const [embedding, metadata] = await Promise.all([
-        getEmbedding(thought),
-        extractMetadata(thought),
-      ]);
-
-      // Apply visibility override if provided
-      if (vizOverride.trim()) {
-        metadata.visibility = vizOverride
-          .split(",")
-          .map((s: string) => s.trim().toLowerCase())
-          .filter(Boolean);
-      }
-
-      // Apply deterministic tag rules (e.g., romance removes sfw)
-      if (Array.isArray(metadata.visibility)) {
-        metadata.visibility = await applyTagRules(
-          metadata.visibility as string[]
-        );
-      }
-
-      const { error } = await supabase.from("thoughts").insert({
-        content: thought,
-        embedding,
-        metadata: { ...metadata, source: "web-form" },
-        submitted_by: "user",
-        evidence_basis: "user typed in web form",
-      });
-
-      if (error) {
-        return new Response(
-          renderHTML({ success: false, error: error.message }, true),
-          { headers: { "Content-Type": "text/html; charset=utf-8" } }
-        );
-      }
-
-      return new Response(
-        renderHTML({ success: true, thought, metadata }, true),
-        { headers: { "Content-Type": "text/html; charset=utf-8" } }
-      );
-    } catch (err) {
-      return new Response(
-        renderHTML(
-          {
-            success: false,
-            error: err instanceof Error ? err.message : "Unknown error",
-          },
-          true
-        ),
-        { headers: { "Content-Type": "text/html; charset=utf-8" } }
-      );
-    }
-  }
-
-  return new Response("Method not allowed", { status: 405 });
-});
+</html>
 ```
 
-#### Deploy
+##### Upload the File
 
-```bash
-supabase functions deploy capture-form --no-verify-jwt
-```
+1. In the Supabase dashboard, go to **Storage** → click on your `public-site` bucket
+2. Click **Upload file** → select the `capture.html` file you just created
+3. After upload, click on the file → copy the **public URL**
 
-> The `--no-verify-jwt` flag disables Supabase's built-in JWT check. Authentication is handled by the capture secret in the form instead.
-
-Copy the Edge Function URL immediately after deployment. It looks like:
+It will look like:
 
 ```
-https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form
+https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/capture.html
 ```
 
-Paste it into your credential tracker as the **Capture Form URL**. Bookmark it, add it to your phone's home screen — this is where you'll capture thoughts.
+Paste this into your credential tracker as the **Capture Page URL**. Bookmark it, add it to your phone's home screen — this is where you'll capture thoughts.
+
+> **Why the split?** Supabase's Edge Function gateway overrides the `Content-Type` to `text/plain` for HTML responses, which causes browsers to show raw source code instead of rendering the page. Supabase Storage serves files with the correct content type based on the file extension. The HTML page calls the Edge Function API via `fetch()`, which handles JSON just fine. If you ever need to update the form UI, just re-upload `capture.html` — no function redeployment needed.
 
 ---
 
 ### Step 8: Test Capture
 
-1. Open your Capture Form URL in a browser
-2. Enter your capture secret to unlock the form
+1. Open your **Capture Page URL** (the Storage URL from Step 7b, NOT the API URL) in a browser
+2. Enter your capture secret and click **Unlock**
 3. Type a test thought:
 
 ```
 Sarah mentioned she's thinking about leaving her job to start a consulting business
 ```
 
-4. Click **Capture**
-5. You should see a confirmation on the page showing something like:
+4. Click **Capture** (or press Ctrl/Cmd+Enter)
+5. The button will show a spinner while processing. After a few seconds you should see a confirmation on the page:
 
 ```
 ✓ Captured
@@ -1400,23 +1516,43 @@ You can change these to match your own privacy boundaries. The rules are read fr
 
 If the specific suggestions below don't solve your issue, the Supabase AI assistant (chat icon, bottom-right of your dashboard) can help diagnose anything Supabase-related. Paste the error message and tell it what step you're on.
 
-### Capture Form Issues
+### Capture Issues
 
-**Form shows "Unlock" again after entering the password**
+**Page shows raw HTML source instead of a form**
 
-The password is wrong. Double-check what you set in `CAPTURE_SECRET`. You can verify with:
+You're probably opening the Edge Function URL directly instead of the Storage URL. The capture page lives at `https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/capture.html`. The Edge Function URL (`/functions/v1/capture-form`) is a JSON API and should not be opened in a browser.
+
+**Unlock does nothing / secret doesn't work**
+
+Open your browser's developer console (F12 → Console tab). If you see a CORS error, the Edge Function is blocking the request. Check that the function is deployed with `--no-verify-jwt` and that the `CORS_HEADERS` in the function include `Access-Control-Allow-Origin: *`. Also verify your capture secret matches what's in `CAPTURE_SECRET`:
 
 ```bash
 supabase secrets list
 ```
 
-**Form submits but nothing appears in the database**
+**Capture button spins and then shows "Network error"**
+
+The `API_URL` in your `capture.html` file has the wrong project ref. Open the file, check the URL, fix it, and re-upload to Storage. You can also test the API directly with curl:
+
+```bash
+curl -X POST https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form \
+  -H "Content-Type: application/json" \
+  -d '{"secret":"your-capture-secret","thought":"test thought"}'
+```
+
+You should get back JSON with `{"success":true,...}`.
+
+**Capture returns an error about the database**
 
 Check Edge Function logs: Supabase dashboard → Edge Functions → capture-form → Logs. Most likely the OpenRouter key is wrong or has no credits.
 
 **Metadata extraction seems off**
 
 That's normal — the LLM is making its best guess with limited context. The metadata is a convenience layer on top of semantic search, not the primary retrieval mechanism. The embedding handles fuzzy matching regardless. You can always override visibility tags manually on the form.
+
+**Need to update the form UI**
+
+Just edit `capture.html` on your computer and re-upload it to the `public-site` bucket in Storage. No function redeployment needed.
 
 ### MCP Server Issues
 
@@ -1468,7 +1604,7 @@ First call on a cold function takes a few seconds (Edge Function waking up). Sub
 
 ## How It Works Under the Hood
 
-When you type a thought in the form: the Edge Function generates an embedding (1536-dimensional vector of meaning) AND extracts metadata via LLM in parallel → both get stored as a single row in Supabase along with the submitter identity (`user`) and evidence basis (`user typed in web form`) → the function renders a confirmation showing what was captured.
+When you type a thought in the form: the static page sends a JSON request to the capture Edge Function → the function generates an embedding (1536-dimensional vector of meaning) AND extracts metadata via LLM in parallel → deterministic tag rules are applied → everything is stored as a single row in Supabase along with the submitter identity (`user`) and evidence basis (`user typed in web form`) → the function returns JSON → the page renders a confirmation showing what was captured.
 
 When you ask your AI about it: your AI client sends the query to the MCP Edge Function → the function validates your access key and loads its filter rules → generates an embedding of your question → Supabase matches it against stored thoughts by vector similarity, filtered by the key's visibility rules → results come back ranked by meaning, not keywords, with provenance information (who submitted it and how) included.
 
@@ -1485,8 +1621,10 @@ Because you're using OpenRouter, you can swap models by editing the model string
 A personal knowledge system where:
 
 - Thoughts go from your browser directly to your database — no third-party chat platform involved
+- The capture UI is a static HTML page served from Supabase Storage; the processing logic is a separate JSON API Edge Function
 - Every thought gets semantic embeddings and automatic metadata including visibility classification
 - Every thought records who submitted it and how the information was sourced, laying groundwork for provenance tracking
+- Deterministic tag rules enforce privacy boundaries regardless of LLM classification
 - Multiple AI agents can connect via MCP, each seeing only what their key allows
 - Keys are hashed, tracked, and independently revocable
 - Everything runs on Supabase's free tier with no local servers to maintain
