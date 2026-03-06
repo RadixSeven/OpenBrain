@@ -22,6 +22,7 @@ About 45 minutes and zero coding experience. You'll copy and paste everything.
 
 - **Supabase** — Your database — stores everything, hosts your server functions
 - **OpenRouter** — Your AI gateway — generates embeddings and classifies your thoughts
+- **GitHub** — Hosts your capture page — one static HTML file served via GitHub Pages
 
 ### If You Get Stuck
 
@@ -32,6 +33,7 @@ Supabase has a free built-in AI assistant in every project dashboard. Look for t
 | Service | Cost |
 |---|---|
 | Supabase (free tier) | $0 |
+| GitHub Pages (free tier) | $0 |
 | Embeddings (text-embedding-3-small) | ~$0.02 / million tokens |
 | Metadata extraction (gpt-4o-mini) | ~$0.15 / million input tokens |
 
@@ -61,9 +63,13 @@ OPENROUTER
   Account password:   ____________
   API key:            ____________  <- Step 4
 
+GITHUB
+  Account:            ____________
+  Repo name:          ____________  <- Step 7b
+  Pages URL:          ____________  <- Step 7b
+
 GENERATED DURING SETUP
   Capture API URL:    ____________  <- Step 7a
-  Capture Page URL:   ____________  <- Step 7b
   Capture Form Secret:____________  <- Step 6
   MCP Server URL:     ____________  <- Step 10
   MCP Keys:           (managed in access_keys table — Step 9)
@@ -77,7 +83,7 @@ GENERATED DURING SETUP
 
 ## Two Parts
 
-**Part 1 — Capture (Steps 1–8):** Static HTML page (Supabase Storage) → JSON API (Edge Function) → Supabase. Type a thought, it gets embedded and classified automatically, you see the result on screen.
+**Part 1 — Capture (Steps 1–8):** Static HTML page (GitHub Pages) → JSON API (Edge Function) → Supabase. Type a thought, it gets embedded and classified automatically, you see the result on screen.
 
 **Part 2 — Retrieval (Steps 9–12):** Hosted MCP Server → Any AI. Connect Claude, ChatGPT, or any MCP client to your brain with a URL and a key that controls what they can see.
 
@@ -395,7 +401,7 @@ Paste your chosen capture secret into the credential tracker.
 
 ### Step 7: Deploy the Capture System
 
-> **Change from original guide:** This replaces the Slack app, the Slack bot token, the Event Subscriptions, and the `ingest-thought` Edge Function. The capture system has two pieces: a JSON API (Edge Function) and a static HTML page (Supabase Storage). They're split because Supabase's gateway rewrites the `Content-Type` header to `text/plain` for Edge Function responses that try to return HTML — so the UI must be served from Storage, which preserves content types correctly.
+> **Change from original guide:** This replaces the Slack app, the Slack bot token, the Event Subscriptions, and the `ingest-thought` Edge Function. The capture system has two pieces: a JSON API (Edge Function) and a static HTML page (GitHub Pages). They're split because Supabase's gateway rewrites the `Content-Type` header to `text/plain` for Edge Function responses that try to return HTML — so the UI must be served elsewhere. GitHub Pages serves static files with correct content types, is free, and gives you version-controlled deploys.
 
 #### Step 7a: Deploy the Capture API (Edge Function)
 
@@ -608,21 +614,24 @@ https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-api
 
 Paste this into your credential tracker as the **Capture API URL**. You won't open this URL in a browser — the static page calls it.
 
-#### Step 7b: Upload the Capture Page (Supabase Storage)
+#### Step 7b: Host the Capture Page (GitHub Pages)
 
-The HTML form lives in Supabase Storage, which serves files with the correct `Content-Type` headers.
+The HTML form lives on GitHub Pages, which serves static files with the correct `Content-Type` headers for free.
 
-##### Create a Storage Bucket
+##### Create a GitHub Repository
 
-1. In the Supabase dashboard, go to **Storage** in the left sidebar
-2. Click **New bucket**
-3. Name it `public-site`
-4. Toggle **Public bucket** ON
-5. Click **Create bucket**
+1. Go to [github.com](https://github.com) and sign in (or create an account)
+2. Click the **+** in the top right → **New repository**
+3. Name it `open-brain` (or whatever you want)
+4. Set it to **Private** (your capture page has no secrets in it, but private keeps your setup out of search engines)
+5. Check **Add a README file**
+6. Click **Create repository**
+
+Paste your GitHub username and repo name into the credential tracker.
 
 ##### Create the HTML File
 
-Create a file called `capture.html` on your computer with the following contents. **Before saving**, replace `YOUR_PROJECT_REF` on the line that sets `API_URL` with your actual project ref from the credential tracker.
+In the repository page, click **Add file → Create new file**. Name it `index.html` and paste the following contents. **Before committing**, replace `YOUR_PROJECT_REF` on the line that sets `API_URL` with your actual project ref from the credential tracker.
 
 ```html
 <!DOCTYPE html>
@@ -885,39 +894,50 @@ Create a file called `capture.html` on your computer with the following contents
 </html>
 ```
 
-##### Upload the File
+Click **Commit changes** (committing directly to `main` is fine).
 
-1. In the Supabase dashboard, go to **Storage** → click on your `public-site` bucket
-2. Click **Upload file** → select the `capture.html` file you just created
-3. After upload, click on the file → copy the **public URL**
+##### Enable GitHub Pages
 
-It will look like:
+1. In the repository, go to **Settings** → **Pages** (in the left sidebar under "Code and automation")
+2. Under **Source**, select **Deploy from a branch**
+3. Set Branch to **main** and folder to **/ (root)**
+4. Click **Save**
+5. Wait 1–2 minutes. GitHub will show the URL at the top of the Pages settings page
+
+Your capture page URL will be:
 
 ```
-https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/capture.html
+https://YOUR_GITHUB_USERNAME.github.io/open-brain/
 ```
 
-Paste this into your credential tracker as the **Capture Page URL**. Bookmark it, add it to your phone's home screen — this is where you'll capture thoughts.
+> **Private repos and GitHub Pages:** GitHub Pages works with private repos on all GitHub plans (including free) as of 2024. The published site is publicly accessible at the Pages URL even though the repo source is private — which is exactly what you want. The HTML contains no secrets; the capture secret is typed at runtime and stored only in `sessionStorage`.
 
-##### CLI-based Upload (optional)
+Paste this URL into your credential tracker as the **Capture Page URL**. Bookmark it, add it to your phone's home screen — this is where you'll capture thoughts.
 
-You can use the Supabase CLI to upload the capture page.
-If you put your capture source in `public-site/capture.html`, you can run:
+##### Updating the Form Later
+
+To update the capture UI, just edit `index.html` in the GitHub repository (via the web UI or by pushing a commit). GitHub Pages redeploys automatically within a minute or two. No Supabase redeployment needed.
+
+##### Using Git from the Command Line (optional)
+
+If you prefer working locally:
 
 ```bash
-supabase storage cp public-site/capture.html \
-    ss:///public-site/capture.html \
-    --content-type text/html \
-    --experimental
+git clone https://github.com/YOUR_GITHUB_USERNAME/open-brain.git
+cd open-brain
+# Edit index.html
+git add index.html
+git commit -m "Update capture form"
+git push
 ```
 
-> **Why the split?** Supabase's Edge Function gateway overrides the `Content-Type` to `text/plain` for HTML responses, which causes browsers to show raw source code instead of rendering the page. Supabase Storage serves files with the correct content type based on the file extension. The HTML page calls the Edge Function API via `fetch()`, which handles JSON just fine. If you ever need to update the form UI, just re-upload `capture.html` — no function redeployment needed.
+> **Why GitHub Pages instead of Supabase Storage?** Supabase's Edge Function gateway overrides the `Content-Type` to `text/plain` for HTML responses, which causes browsers to show raw source code instead of rendering the page. The previous version of this guide used Supabase Storage to work around this, but GitHub Pages is simpler: you get version control for free, updates are just git commits, and there's no bucket configuration to manage. The HTML page calls the Edge Function API via `fetch()`, which handles JSON just fine.
 
 ---
 
 ### Step 8: Test Capture
 
-1. Open your **Capture Page URL** (the Storage URL from Step 7b, NOT the API URL) in a browser
+1. Open your **Capture Page URL** (the GitHub Pages URL from Step 7b, NOT the API URL) in a browser
 2. Enter your capture secret and click **Unlock**
 3. Type a test thought:
 
@@ -1532,7 +1552,7 @@ If the specific suggestions below don't solve your issue, the Supabase AI assist
 
 **Page shows raw HTML source instead of a form**
 
-You're probably opening the Edge Function URL directly instead of the Storage URL. The capture page lives at `https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/capture.html`. The Edge Function URL (`/functions/v1/capture-api`) is a JSON API and should not be opened in a browser.
+You're probably opening the Edge Function URL directly instead of the GitHub Pages URL. The capture page lives at `https://YOUR_GITHUB_USERNAME.github.io/open-brain/`. The Edge Function URL (`/functions/v1/capture-api`) is a JSON API and should not be opened in a browser.
 
 **Unlock does nothing / secret doesn't work**
 
@@ -1544,7 +1564,7 @@ supabase secrets list
 
 **Capture button spins and then shows "Network error"**
 
-The `API_URL` in your `capture.html` file has the wrong project ref. Open the file, check the URL, fix it, and re-upload to Storage. You can also test the API directly with curl:
+The `API_URL` in your `index.html` file has the wrong project ref. Edit the file in your GitHub repository, fix the URL, and commit. GitHub Pages will redeploy within a minute or two. You can also test the API directly with curl:
 
 ```bash
 curl -X POST https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-api \
@@ -1564,7 +1584,7 @@ That's normal — the LLM is making its best guess with limited context. The met
 
 **Need to update the form UI**
 
-Just edit `capture.html` on your computer and re-upload it to the `public-site` bucket in Storage. No function redeployment needed.
+Just edit `index.html` in your GitHub repository and commit. GitHub Pages redeploys automatically. No Supabase function redeployment needed.
 
 ### MCP Server Issues
 
@@ -1616,7 +1636,7 @@ First call on a cold function takes a few seconds (Edge Function waking up). Sub
 
 ## How It Works Under the Hood
 
-When you type a thought in the form: the static page sends a JSON request to the capture Edge Function → the function generates an embedding (1536-dimensional vector of meaning) AND extracts metadata via LLM in parallel → deterministic tag rules are applied → everything is stored as a single row in Supabase along with the submitter identity (`user`) and evidence basis (`user typed in web form`) → the function returns JSON → the page renders a confirmation showing what was captured.
+When you type a thought in the form: the GitHub Pages site sends a JSON request to the capture Edge Function → the function generates an embedding (1536-dimensional vector of meaning) AND extracts metadata via LLM in parallel → deterministic tag rules are applied → everything is stored as a single row in Supabase along with the submitter identity (`user`) and evidence basis (`user typed in web form`) → the function returns JSON → the page renders a confirmation showing what was captured.
 
 When you ask your AI about it: your AI client sends the query to the MCP Edge Function → the function validates your access key and loads its filter rules → generates an embedding of your question → Supabase matches it against stored thoughts by vector similarity, filtered by the key's visibility rules → results come back ranked by meaning, not keywords, with provenance information (who submitted it and how) included.
 
@@ -1633,7 +1653,7 @@ Because you're using OpenRouter, you can swap models by editing the model string
 A personal knowledge system where:
 
 - Thoughts go from your browser directly to your database — no third-party chat platform involved
-- The capture UI is a static HTML page served from Supabase Storage; the processing logic is a separate JSON API Edge Function
+- The capture UI is a static HTML page served from GitHub Pages; the processing logic is a separate JSON API Edge Function
 - Every thought gets semantic embeddings and automatic metadata including visibility classification
 - Every thought records who submitted it and how the information was sourced, laying groundwork for provenance tracking
 - Deterministic tag rules enforce privacy boundaries regardless of LLM classification
