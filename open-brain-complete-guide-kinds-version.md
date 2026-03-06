@@ -404,12 +404,12 @@ This function accepts JSON, does the embedding/classification/tag-rule work, sto
 ##### Create the Function
 
 ```bash
-supabase functions new capture-form
+supabase functions new capture-api
 ```
 
 ##### Write the Code
 
-Open `supabase/functions/capture-form/index.ts` and replace its entire contents with:
+Open `supabase/functions/capture-api/index.ts` and replace its entire contents with:
 
 ```typescript
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
@@ -597,13 +597,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 ##### Deploy
 
 ```bash
-supabase functions deploy capture-form --no-verify-jwt
+supabase functions deploy capture-api --no-verify-jwt
 ```
 
 The API endpoint is:
 
 ```
-https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form
+https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-api
 ```
 
 Paste this into your credential tracker as the **Capture API URL**. You won't open this URL in a browser — the static page calls it.
@@ -735,7 +735,7 @@ Create a file called `capture.html` on your computer with the following contents
     // ---- CONFIGURATION ----
     // Replace YOUR_PROJECT_REF with your Supabase project ref.
     const API_URL =
-      "https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form";
+      "https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-api";
 
     // ---- STATE ----
     function getSecret() { return sessionStorage.getItem("ob_secret") || ""; }
@@ -1520,7 +1520,7 @@ If the specific suggestions below don't solve your issue, the Supabase AI assist
 
 **Page shows raw HTML source instead of a form**
 
-You're probably opening the Edge Function URL directly instead of the Storage URL. The capture page lives at `https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/capture.html`. The Edge Function URL (`/functions/v1/capture-form`) is a JSON API and should not be opened in a browser.
+You're probably opening the Edge Function URL directly instead of the Storage URL. The capture page lives at `https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/capture.html`. The Edge Function URL (`/functions/v1/capture-api`) is a JSON API and should not be opened in a browser.
 
 **Unlock does nothing / secret doesn't work**
 
@@ -1535,7 +1535,7 @@ supabase secrets list
 The `API_URL` in your `capture.html` file has the wrong project ref. Open the file, check the URL, fix it, and re-upload to Storage. You can also test the API directly with curl:
 
 ```bash
-curl -X POST https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-form \
+curl -X POST https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-api \
   -H "Content-Type: application/json" \
   -d '{"secret":"your-capture-secret","thought":"test thought"}'
 ```
@@ -1544,7 +1544,7 @@ You should get back JSON with `{"success":true,...}`.
 
 **Capture returns an error about the database**
 
-Check Edge Function logs: Supabase dashboard → Edge Functions → capture-form → Logs. Most likely the OpenRouter key is wrong or has no credits.
+Check Edge Function logs: Supabase dashboard → Edge Functions → capture-api → Logs. Most likely the OpenRouter key is wrong or has no credits.
 
 **Metadata extraction seems off**
 
