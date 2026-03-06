@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Open Brain — Capture</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            background: #0a0a0a; color: #e0e0e0;
+            display: flex; justify-content: center;
+            padding: 2rem 1rem; min-height: 100vh;
+        }
+        .container { max-width: 600px; width: 100%; }
+        h1 { font-size: 1.4rem; margin-bottom: 1.5rem; color: #fff; }
+        textarea {
+            width: 100%; padding: 0.75rem; font-size: 1rem;
+            background: #1a1a1a; color: #e0e0e0;
+            border: 1px solid #333; border-radius: 6px;
+            resize: vertical; font-family: inherit;
+        }
+        textarea:focus, input:focus { outline: none; border-color: #4a9eff; }
+        input[type="password"], input[type="text"] {
+            width: 100%; padding: 0.75rem; font-size: 1rem;
+            background: #1a1a1a; color: #e0e0e0;
+            border: 1px solid #333; border-radius: 6px; font-family: inherit;
+        }
+        button {
+            padding: 0.75rem 1.5rem; font-size: 1rem;
+            background: #4a9eff; color: #fff; border: none;
+            border-radius: 6px; cursor: pointer; white-space: nowrap;
+        }
+        button:hover { background: #3a8eef; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .form-row {
+            display: flex; gap: 0.75rem; margin-top: 0.75rem;
+            align-items: flex-end;
+        }
+        .viz-label { flex: 1; font-size: 0.85rem; color: #888; }
+        .viz-label input { margin-top: 0.3rem; }
+        .login-form { display: flex; gap: 0.75rem; }
+        .login-form input { flex: 1; }
+        .result { margin-top: 1.5rem; padding: 1rem; border-radius: 6px; }
+        .result.success { background: #0d2818; border: 1px solid #1a5c2e; }
+        .result.error { background: #2a0d0d; border: 1px solid #5c1a1a; }
+        .result h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+        .thought-echo {
+            font-style: italic; color: #aaa;
+            margin-bottom: 0.75rem; padding-bottom: 0.75rem;
+            border-bottom: 1px solid #333;
+        }
+        .meta-grid {
+            display: grid; grid-template-columns: 1fr 1fr;
+            gap: 0.4rem 1rem;
+        }
+        .meta-item { display: flex; flex-direction: column; }
+        .meta-item .label {
+            font-size: 0.75rem; color: #666;
+            text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        .meta-item .value { font-size: 0.9rem; }
+        .footer-row {
+            margin-top: 1.5rem; text-align: right; font-size: 0.85rem;
+        }
+        .footer-row a { color: #666; text-decoration: none; }
+        .footer-row a:hover { color: #999; }
+        .hidden { display: none; }
+        .spinner {
+            display: inline-block; width: 1em; height: 1em;
+            border: 2px solid #555; border-top-color: #4a9eff;
+            border-radius: 50%; animation: spin 0.6s linear infinite;
+            vertical-align: middle; margin-right: 0.4em;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Open Brain</h1>
+
+    <!-- Login screen -->
+    <div id="loginSection">
+        <div class="login-form">
+            <input type="password" id="secretInput"
+                   placeholder="Enter capture secret" autofocus />
+            <button id="unlockBtn">Unlock</button>
+        </div>
+    </div>
+
+    <!-- Capture screen (hidden until authenticated) -->
+    <div id="captureSection" class="hidden">
+      <textarea id="thoughtInput" placeholder="Type a thought..."
+                rows="4"></textarea>
+        <div class="form-row">
+            <label class="viz-label">Override visibility (optional):
+                <input type="text" id="vizOverride"
+                       placeholder="e.g. sfw, work, technical" />
+            </label>
+            <button id="captureBtn">Capture</button>
+        </div>
+        <div id="resultArea"></div>
+        <div class="footer-row"><a href="#" id="lockLink">Lock</a></div>
+    </div>
+</div>
+
+<script>
+    // ---- CONFIGURATION ----
+    // Replace YOUR_PROJECT_REF with your Supabase project ref.
+    const API_URL =
+        "https://YOUR_PROJECT_REF.supabase.co/functions/v1/capture-api";
+
+    // ---- STATE ----
+    function getSecret() { return sessionStorage.getItem("ob_secret") || ""; }
+    function setSecret(s) { sessionStorage.setItem("ob_secret", s); }
+    function clearSecret() { sessionStorage.removeItem("ob_secret"); }
+
+    // ---- ELEMENTS ----
+    const loginSection   = document.getElementById("loginSection");
+    const captureSection = document.getElementById("captureSection");
+    const secretInput    = document.getElementById("secretInput");
+    const unlockBtn      = document.getElementById("unlockBtn");
+    const thoughtInput   = document.getElementById("thoughtInput");
+    const vizOverride    = document.getElementById("vizOverride");
+    const captureBtn     = document.getElementById("captureBtn");
+    const resultArea     = document.getElementById("resultArea");
+    const lockLink       = document.getElementById("lockLink");
+
+    // ---- SCREEN SWITCHING ----
+    function showCapture() {
+        loginSection.classList.add("hidden");
+        captureSection.classList.remove("hidden");
+        thoughtInput.focus();
+    }
+    function showLogin() {
+        captureSection.classList.add("hidden");
+        loginSection.classList.remove("hidden");
+        secretInput.value = "";
+        secretInput.focus();
+    }
+
+    // If secret is already in session, skip login
+    if (getSecret()) showCapture();
+
+    // ---- LOGIN ----
+    unlockBtn.addEventListener("click", () => {
+        const s = secretInput.value.trim();
+        if (!s) return;
+        setSecret(s);
+        showCapture();
+    });
+    secretInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") unlockBtn.click();
+    });
+
+    // ---- LOCK ----
+    lockLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        clearSecret();
+        resultArea.innerHTML = "";
+        showLogin();
+    });
+
+    // ---- CAPTURE ----
+    captureBtn.addEventListener("click", async () => {
+        const thought = thoughtInput.value.trim();
+        if (!thought) return;
+
+        captureBtn.disabled = true;
+        captureBtn.innerHTML = '<span class="spinner"></span>Capturing…';
+        resultArea.innerHTML = "";
+
+        try {
+            const resp = await fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    secret: getSecret(),
+                    thought: thought,
+                    visibility_override: vizOverride.value.trim(),
+                }),
+            });
+
+            const data = await resp.json();
+
+            if (resp.status === 401) {
+                // Bad secret — force re-login
+                clearSecret();
+                resultArea.innerHTML = renderError("Invalid secret. Please unlock again.");
+                showLogin();
+                return;
+            }
+
+            if (!resp.ok || !data.success) {
+                resultArea.innerHTML = renderError(data.error || "Unknown error");
+                return;
+            }
+
+            // Success
+            resultArea.innerHTML = renderSuccess(thought, data.metadata);
+            thoughtInput.value = "";
+            vizOverride.value = "";
+            thoughtInput.focus();
+
+        } catch (err) {
+            resultArea.innerHTML = renderError(
+                "Network error — is the Edge Function deployed? " + err.message
+            );
+        } finally {
+            captureBtn.disabled = false;
+            captureBtn.textContent = "Capture";
+        }
+    });
+
+    // Ctrl/Cmd+Enter to submit
+    thoughtInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) captureBtn.click();
+    });
+
+    // ---- RENDERERS ----
+    function esc(s) {
+        const d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function renderSuccess(thought, meta) {
+        let html = '<div class="result success"><h3>&#10003; Captured</h3>';
+        html += '<p class="thought-echo">' + esc(thought) + "</p>";
+        html += '<div class="meta-grid">';
+        html += metaItem("Type", meta.type);
+        html += metaItem("Topics", arr(meta.topics));
+        html += metaItem("Visibility", arr(meta.visibility));
+        if (meta.people && meta.people.length)
+            html += metaItem("People", arr(meta.people));
+        if (meta.action_items && meta.action_items.length)
+            html += metaItem("Action items", meta.action_items.join("; "));
+        html += "</div></div>";
+        return html;
+    }
+
+    function renderError(msg) {
+        return '<div class="result error"><h3>&#10007; Error</h3><p>'
+            + esc(msg) + "</p></div>";
+    }
+
+    function metaItem(label, value) {
+        return '<div class="meta-item"><span class="label">'
+            + esc(label) + '</span><span class="value">'
+            + esc(value || "—") + "</span></div>";
+    }
+
+    function arr(a) {
+        return Array.isArray(a) ? a.join(", ") : (a || "—");
+    }
+</script>
+</body>
+</html>
