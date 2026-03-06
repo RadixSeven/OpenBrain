@@ -51,10 +51,15 @@ async function extractMetadata(
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note"
-- "visibility": array of applicable labels from: "sfw", "personal", "work", "technical", "health", "financial", "relationship"
+- "visibility": array of applicable labels from: "sfw", "personal", "work",
+  "technical", "health", "financial", "romantic_or_sexual_relationship",
+  "family_relationship", "other_relationship", "lgbtq_identity", "activism"
   A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
+  The user has two names: Eric David Moyer and Kind Loving Truth. Anything mentioning Kind Loving Truth
+  (or just Kind or Kind Truth) is not safe for work.
+  Anything related the user's LGBTQIA+ identity is not safe for work.
   Default to ["sfw"] if the thought is clearly innocuous.
-  Most thoughts should include "sfw" unless they contain genuinely private content.
+  Thoughts should include "sfw" unless they contain genuinely private content.
 Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
