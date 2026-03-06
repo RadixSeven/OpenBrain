@@ -12,7 +12,7 @@ The key privacy features in this version:
 
 - **No Slack.** Your thoughts go directly from a password-protected web form to your database. No third-party chat platform sees them.
 - **Filtered access.** Each MCP access key maps to a filter profile. You can give a work agent a key that only sees thoughts tagged "sfw," while your personal setup sees everything.
-- **Multiple secrets.** Different agents get different keys, stored hashed in your database. You can name them, track usage, and revoke them independently.
+- **Multiple secrets.** Different agents get different keys, stored in your database. You can name them, track usage, and revoke them independently.
 
 ### What You Need
 
@@ -72,7 +72,7 @@ GENERATED DURING SETUP
   Capture API URL:    ____________  <- Step 7a
   Capture Form Secret:____________  <- Step 6
   MCP Server URL:     ____________  <- Step 10
-  MCP Keys:           (managed in access_keys table — Step 9)
+  MCP Keys:           (stored in access_keys table — Step 9)
 
 --------------------------------------
 ```
@@ -114,8 +114,6 @@ Several SQL commands, pasted one at a time. This creates your storage tables, se
 #### Enable Extensions
 
 In the left sidebar: **Database → Extensions** → search for "vector" → flip **pgvector** ON.
-
-Then search for "pgcrypto" → flip **pgcrypto** ON. (We need this to hash access keys.)
 
 #### Create the Thoughts Table
 
@@ -167,7 +165,7 @@ New query → paste and Run:
 create table access_keys (
   id uuid primary key default gen_random_uuid(),
   name text not null,                    -- human label: "work-copilot", "personal-claude"
-  key_hash text not null unique,         -- SHA-256 hash of the actual key
+  key text not null unique,              -- the access key (random hex string)
   filters jsonb not null default '{}'::jsonb,
     -- {} means "no restrictions, see everything"
     -- {"visibility": ["sfw"]} means "only thoughts containing 'sfw' in visibility"
@@ -283,7 +281,7 @@ begin
   return query
   update access_keys
   set last_used_at = now()
-  where key_hash = encode(digest(raw_key, 'sha256'), 'hex')
+  where key = raw_key
     and active = true
   returning id, name, access_keys.filters;
 end;
@@ -1002,9 +1000,9 @@ Go to Supabase dashboard → **SQL Editor** → New query. For each key:
 **Personal key (full access to everything):**
 
 ```sql
-insert into access_keys (name, key_hash, filters) values (
+insert into access_keys (name, key, filters) values (
   'personal-full-access',
-  encode(digest('PASTE-YOUR-64-CHAR-KEY-HERE', 'sha256'), 'hex'),
+  'PASTE-YOUR-64-CHAR-KEY-HERE',
   '{}'::jsonb
 );
 ```
@@ -1014,16 +1012,14 @@ The empty `{}` filter means this key sees all thoughts with no restrictions.
 **Work key (SFW content only):**
 
 ```sql
-insert into access_keys (name, key_hash, filters) values (
+insert into access_keys (name, key, filters) values (
   'work-copilot',
-  encode(digest('PASTE-YOUR-OTHER-64-CHAR-KEY-HERE', 'sha256'), 'hex'),
+  'PASTE-YOUR-OTHER-64-CHAR-KEY-HERE',
   '{"visibility": ["sfw", "work", "technical"]}'::jsonb
 );
 ```
 
 This key only returns thoughts whose `visibility` metadata array contains at least one of `sfw`, `work`, or `technical`.
-
-Save the actual (unhashed) keys somewhere safe — you'll paste them into your AI client configs. The database only stores the hash.
 
 #### Other Filter Examples
 
@@ -1450,7 +1446,7 @@ Ask your AI naturally. It picks the right tool automatically:
 ### See all keys and last usage
 
 ```sql
-select name, active, created_at, last_used_at, filters
+select name, key, active, created_at, last_used_at, filters
 from access_keys
 order by created_at;
 ```
@@ -1462,9 +1458,9 @@ openssl rand -hex 32
 ```
 
 ```sql
-insert into access_keys (name, key_hash, filters) values (
+insert into access_keys (name, key, filters) values (
   'new-agent-name',
-  encode(digest('paste-the-64-char-key-here', 'sha256'), 'hex'),
+  'paste-the-64-char-key-here',
   '{"visibility": ["sfw"]}'::jsonb
 );
 ```
@@ -1595,7 +1591,7 @@ Check that your URL is exactly right — including `https://` and no trailing sl
 **Getting 401 errors**
 
 The access key doesn't match any active key in the `access_keys` table. Verify that:
-1. The key you're using matches what you hashed when inserting
+1. The key you're using matches what's stored in the `key` column
 2. The key's `active` column is `true`
 3. The header name is `x-brain-key` (lowercase, with the dash)
 
@@ -1658,7 +1654,7 @@ A personal knowledge system where:
 - Every thought records who submitted it and how the information was sourced, laying groundwork for provenance tracking
 - Deterministic tag rules enforce privacy boundaries regardless of LLM classification
 - Multiple AI agents can connect via MCP, each seeing only what their key allows
-- Keys are hashed, tracked, and independently revocable
+- Keys are tracked and independently revocable
 - Everything runs on Supabase's free tier with no local servers to maintain
 
 *Based on [Open Brain by Nate B. Jones](https://natebjones.com). Original guide uses Slack for capture and a single access key. This version replaces Slack with a web form, adds per-key content filtering, and supports multiple access keys for different agent contexts.*
