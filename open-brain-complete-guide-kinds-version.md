@@ -899,6 +899,18 @@ https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/public-site/captur
 
 Paste this into your credential tracker as the **Capture Page URL**. Bookmark it, add it to your phone's home screen — this is where you'll capture thoughts.
 
+##### CLI-based Upload (optional)
+
+You can use the Supabase CLI to upload the capture page.
+If you put your capture source in `public-site/capture.html`, you can run:
+
+```bash
+supabase storage cp public-site/capture.html \
+    ss:///public-site/capture.html \
+    --content-type text/html \
+    --experimental
+```
+
 > **Why the split?** Supabase's Edge Function gateway overrides the `Content-Type` to `text/plain` for HTML responses, which causes browsers to show raw source code instead of rendering the page. Supabase Storage serves files with the correct content type based on the file extension. The HTML page calls the Edge Function API via `fetch()`, which handles JSON just fine. If you ever need to update the form UI, just re-upload `capture.html` — no function redeployment needed.
 
 ---
