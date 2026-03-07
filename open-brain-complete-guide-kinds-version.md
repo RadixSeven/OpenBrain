@@ -1696,23 +1696,11 @@ You need two things from your credential tracker: the MCP Server URL (Step 10) a
 
 #### Claude Desktop
 
-Settings → Developer → Edit Config:
+Settings → Developer → Edit Config
 
-```json
-{
-  "mcpServers": {
-    "open-brain": {
-      "type": "streamable-http",
-      "url": "https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp",
-      "headers": {
-        "x-brain-key": "your-personal-full-access-key"
-      }
-    }
-  }
-}
-```
+Does not work - only supports OAuth, no auth, and STDIO
 
-Restart Claude Desktop. You should see "open-brain" appear in the MCP tools indicator (the hammer icon).
+If it worked, the next instruction would be to restart Claude Desktop. Then you would see "open-brain" appear in the MCP tools indicator (the hammer icon).
 
 #### Claude Code
 
