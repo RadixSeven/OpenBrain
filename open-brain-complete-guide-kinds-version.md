@@ -1718,8 +1718,9 @@ Restart Claude Desktop. You should see "open-brain" appear in the MCP tools indi
 
 ```bash
 claude mcp add open-brain \
-  --transport http \
-  --url https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp \
+  --scope user \
+  --transport http open-brain \
+  https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp \
   --header "x-brain-key: your-key-here"
 ```
 
