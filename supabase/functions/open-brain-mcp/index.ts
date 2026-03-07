@@ -25,8 +25,72 @@ async function getEmbedding(text: string): Promise<number[]> {
       input: text,
     }),
   });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
+  }
   const d = await r.json();
   return d.data[0].embedding;
+}
+
+async function extractMetadata(
+    text: string
+): Promise<Record<string, unknown>> {
+  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "openai/gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Extract metadata from the user's captured thought. Return JSON with:
+- "people": array of people mentioned (empty if none)
+- "action_items": array of implied to-dos (empty if none)
+- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
+- "topics": array of 1-3 short topic tags (always at least one)
+- "type": one of "observation", "task", "idea", "reference", "person_note"
+- "visibility": array of applicable labels from: "sfw", "personal", "work", "technical", "health", "financial", "relationship"
+  A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
+  Default to ["sfw"] if the thought is clearly innocuous.
+  Most thoughts should include "sfw" unless they contain genuinely private content.
+Only extract what's explicitly there.`,
+        },
+        { role: "user", content: text },
+      ],
+    }),
+  });
+  const d = await r.json();
+  try {
+    return JSON.parse(d.choices[0].message.content);
+  } catch {
+    return {
+      topics: ["uncategorized"],
+      type: "observation",
+      visibility: ["sfw"],
+    };
+  }
+}
+
+async function applyTagRules(visibility: string[]): Promise<string[]> {
+  const { data: rules, error } = await supabase
+      .from("tag_rules")
+      .select("if_present, remove_tag")
+      .eq("active", true);
+
+  if (error || !rules || rules.length === 0) return visibility;
+
+  let result = [...visibility];
+  for (const rule of rules) {
+    if (result.includes(rule.if_present)) {
+      result = result.filter((tag: string) => tag !== rule.remove_tag);
+    }
+  }
+  return result;
 }
 
 // --- Hono app with auth middleware ---
@@ -144,137 +208,330 @@ app.all("*", async (c) => {
       }
   );
 
-  // --- Tool: Browse Recent ---
+  // --- Tool: List Thoughts ---
   server.registerTool(
-      "browse_recent",
+      "list_thoughts",
       {
-        title: "Browse Recent Thoughts",
-        description: "Browse recently captured thoughts in reverse chronological order.",
+        title: "List Recent Thoughts",
+        description:
+            "List recently captured thoughts with optional filters by type, topic, person, time range, or content pattern.",
         inputSchema: {
           count: z
               .number()
               .min(1)
               .max(50)
               .default(10)
-              .describe("Number of recent thoughts to fetch"),
+              .describe("Number of thoughts to return"),
+          type: z
+              .string()
+              .optional()
+              .describe(
+                  "Filter by type: observation, task, idea, reference, person_note"
+              ),
+          topic: z.string().optional().describe("Filter by topic tag"),
+          person: z
+              .string()
+              .optional()
+              .describe("Filter by person mentioned"),
+          days: z
+              .number()
+              .optional()
+              .describe("Only thoughts from the last N days"),
+          pattern: z
+              .string()
+              .optional()
+              .describe(
+                  "Regex pattern to filter thought content (case-insensitive)"
+              ),
         },
       },
-      async ({ count }) => {
-        let query = supabase
-            .from("thoughts")
-            .select("id, content, metadata, submitted_by, evidence_basis, created_at")
-            .order("created_at", { ascending: false })
-            .limit(count || 10);
-
-        // Apply visibility filter from the access key
-        if (visFilter) {
-          query = query.or(
-              visFilter
-                  .map((v: string) => `metadata->visibility.cs.["${v}"]`)
-                  .join(",")
+      async ({ count, type, topic, person, days, pattern }) => {
+        try {
+          const { data, error } = await supabase.rpc(
+              "list_thoughts_filtered",
+              {
+                result_count: count || 10,
+                filter_type: type || null,
+                filter_topic: topic || null,
+                filter_person: person || null,
+                filter_days: days || null,
+                content_pattern: pattern || null,
+                visibility_filter: visFilter,
+              }
           );
-        }
 
-        const { data, error } = await query;
+          if (error) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Error listing thoughts: ${error.message}`,
+                },
+              ],
+              isError: true,
+            };
+          }
 
-        if (error) {
+          if (!data || data.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "No thoughts matched the given filters.",
+                },
+              ],
+            };
+          }
+
+          const results = (data as {
+            content: string;
+            metadata: Record<string, unknown>;
+            submitted_by: string;
+            evidence_basis: string;
+            created_at: string;
+          }[])
+              .map((t, i) => {
+                const meta = t.metadata || {};
+                const date = new Date(t.created_at).toLocaleDateString();
+                const tags = Array.isArray(meta.topics)
+                    ? (meta.topics as string[]).join(", ")
+                    : "";
+                let entry = `${i + 1}. [${date}] (${meta.type || "??"}${tags ? " — " + tags : ""}) [by: ${t.submitted_by}]\n   ${t.content}`;
+                if (
+                    t.evidence_basis &&
+                    t.evidence_basis !== "user typed in web form"
+                )
+                  entry += `\n   Source: ${t.evidence_basis}`;
+                if (Array.isArray(meta.people) && meta.people.length > 0)
+                  entry += `\n   People: ${(meta.people as string[]).join(", ")}`;
+                if (
+                    Array.isArray(meta.action_items) &&
+                    meta.action_items.length > 0
+                )
+                  entry += `\n   Actions: ${(meta.action_items as string[]).join("; ")}`;
+                return entry;
+              })
+              .join("\n\n");
+
           return {
-            content: [{ type: "text" as const, text: `Browse error: ${error.message}` }],
+            content: [
+              {
+                type: "text" as const,
+                text: `${data.length} thought(s):\n\n${results}`,
+              },
+            ],
+          };
+        } catch (err: unknown) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: ${(err as Error).message}`,
+              },
+            ],
+            isError: true,
           };
         }
-
-        if (!data || data.length === 0) {
-          return {
-            content: [{ type: "text" as const, text: "No thoughts captured yet." }],
-          };
-        }
-
-        const results = data
-            .map(
-                (t: {
-                  content: string;
-                  metadata: Record<string, unknown>;
-                  submitted_by: string;
-                  evidence_basis: string;
-                  created_at: string;
-                }) => {
-                  const meta = t.metadata || {};
-                  const date = new Date(t.created_at).toLocaleDateString();
-                  let entry = `[${date} | by: ${t.submitted_by}] ${t.content}`;
-                  if (t.evidence_basis && t.evidence_basis !== "user typed in web form")
-                    entry += `\nSource: ${t.evidence_basis}`;
-                  if (Array.isArray(meta.topics) && meta.topics.length > 0)
-                    entry += `\nTopics: ${(meta.topics as string[]).join(", ")}`;
-                  return entry;
-                }
-            )
-            .join("\n\n---\n\n");
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `${data.length} recent thoughts:\n\n${results}`,
-            },
-          ],
-        };
       }
   );
 
-  // --- Tool: Stats ---
+  // --- Tool: Thought Stats ---
   server.registerTool(
-      "brain_stats",
+      "thought_stats",
       {
-        title: "Brain Stats",
+        title: "Thought Statistics",
         description:
-            "Get an overview of your stored thoughts — total count, recent activity, top topics.",
+            "Get a summary of stored thoughts: totals, types, top topics, and people mentioned.",
         inputSchema: {},
       },
       async () => {
-        // Total count (respecting visibility)
-        let countQuery = supabase
-            .from("thoughts")
-            .select("id", { count: "exact", head: true });
+        try {
+          // Fetch all metadata for visible thoughts
+          let query = supabase
+              .from("thoughts")
+              .select("metadata, created_at")
+              .order("created_at", { ascending: false });
 
-        if (visFilter) {
-          countQuery = countQuery.or(
-              visFilter
-                  .map((v: string) => `metadata->visibility.cs.["${v}"]`)
-                  .join(",")
-          );
+          if (visFilter) {
+            query = query.or(
+                visFilter
+                    .map((v: string) => `metadata->visibility.cs.["${v}"]`)
+                    .join(",")
+            );
+          }
+
+          const { data, error } = await query;
+
+          if (error) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Stats error: ${error.message}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const total = data?.length ?? 0;
+
+          if (!data || total === 0) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "No thoughts captured yet.",
+                },
+              ],
+            };
+          }
+
+          const types: Record<string, number> = {};
+          const topics: Record<string, number> = {};
+          const people: Record<string, number> = {};
+
+          for (const r of data) {
+            const m = (r.metadata || {}) as Record<string, unknown>;
+            if (m.type)
+              types[m.type as string] = (types[m.type as string] || 0) + 1;
+            if (Array.isArray(m.topics))
+              for (const t of m.topics)
+                topics[t as string] = (topics[t as string] || 0) + 1;
+            if (Array.isArray(m.people))
+              for (const p of m.people)
+                people[p as string] = (people[p as string] || 0) + 1;
+          }
+
+          const sort = (o: Record<string, number>): [string, number][] =>
+              Object.entries(o)
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 10);
+
+          const oldest = data[data.length - 1].created_at;
+          const newest = data[0].created_at;
+
+          const lines: string[] = [
+            `Total thoughts: ${total}`,
+            `Date range: ${new Date(oldest).toLocaleDateString()} → ${new Date(newest).toLocaleDateString()}`,
+            "",
+            "Types:",
+            ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
+          ];
+
+          if (Object.keys(topics).length) {
+            lines.push("", "Top topics:");
+            for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
+          }
+
+          if (Object.keys(people).length) {
+            lines.push("", "People mentioned:");
+            for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
+          }
+
+          lines.push("", `Key: ${keyRecord.key_name}`);
+
+          return {
+            content: [{ type: "text" as const, text: lines.join("\n") }],
+          };
+        } catch (err: unknown) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: ${(err as Error).message}`,
+              },
+            ],
+            isError: true,
+          };
         }
+      }
+  );
 
-        const { count: total } = await countQuery;
+  // --- Tool: Capture Thought ---
+  server.registerTool(
+      "capture_thought",
+      {
+        title: "Capture Thought",
+        description:
+            "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to remember something — notes, insights, decisions, observations about people, or migrated content from other systems.",
+        inputSchema: {
+          content: z
+              .string()
+              .describe(
+                  "The thought to capture — a clear, standalone statement that will make sense when retrieved later"
+              ),
+          evidence_basis: z
+              .string()
+              .optional()
+              .describe(
+                  "How this information was sourced, e.g. 'summarized from meeting notes', 'user dictated'. Defaults to automatic provenance tracking."
+              ),
+        },
+      },
+      async ({ content, evidence_basis }) => {
+        try {
+          const [embedding, metadata] = await Promise.all([
+            getEmbedding(content),
+            extractMetadata(content),
+          ]);
 
-        // Most recent thought
-        let recentQuery = supabase
-            .from("thoughts")
-            .select("created_at")
-            .order("created_at", { ascending: false })
-            .limit(1);
+          // Apply deterministic tag rules
+          if (Array.isArray(metadata.visibility)) {
+            metadata.visibility = await applyTagRules(
+                metadata.visibility as string[]
+            );
+          }
 
-        if (visFilter) {
-          recentQuery = recentQuery.or(
-              visFilter
-                  .map((v: string) => `metadata->visibility.cs.["${v}"]`)
-                  .join(",")
-          );
+          const submittedBy = `mcp ${keyRecord.key_name}`;
+          const basis =
+              evidence_basis || `captured via MCP by ${keyRecord.key_name}`;
+
+          const { error } = await supabase.from("thoughts").insert({
+            content,
+            embedding,
+            metadata: { ...metadata, source: "mcp" },
+            submitted_by: submittedBy,
+            evidence_basis: basis,
+          });
+
+          if (error) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Failed to capture: ${error.message}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const meta = metadata as Record<string, unknown>;
+          let confirmation = `Captured as ${meta.type || "thought"}`;
+          if (Array.isArray(meta.topics) && meta.topics.length)
+            confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
+          if (Array.isArray(meta.people) && meta.people.length)
+            confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
+          if (Array.isArray(meta.action_items) && meta.action_items.length)
+            confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+          if (Array.isArray(meta.visibility))
+            confirmation += ` | Visibility: ${(meta.visibility as string[]).join(", ")}`;
+
+          return {
+            content: [{ type: "text" as const, text: confirmation }],
+          };
+        } catch (err: unknown) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: ${(err as Error).message}`,
+              },
+            ],
+            isError: true,
+          };
         }
-
-        const { data: recent } = await recentQuery;
-
-        const lastDate = recent?.[0]?.created_at
-            ? new Date(recent[0].created_at).toLocaleString()
-            : "never";
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Brain stats:\n- Total thoughts (visible to this key): ${total ?? 0}\n- Most recent: ${lastDate}\n\nKey: ${keyRecord.key_name}`,
-            },
-          ],
-        };
       }
   );
 

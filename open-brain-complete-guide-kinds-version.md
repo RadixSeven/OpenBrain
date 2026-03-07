@@ -1584,7 +1584,7 @@ app.all("*", async (c) => {
     {
       title: "Capture Thought",
       description:
-        "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to remember something — notes, insights, decisions, observations about people, or migrated content from other systems.",
+        "Save a new thought to the Open Brain, extracting metadata automatically. Use this when the user wants to remember something — notes, insights, decisions, observations about people, or migrated content from other systems. Or you think you may need to remember something in the future.",
       inputSchema: {
         content: z
           .string()
