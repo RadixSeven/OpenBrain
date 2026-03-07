@@ -6,7 +6,7 @@
 
 ## What You're Building
 
-A personal knowledge system with semantic search and an open protocol. You type a thought into a web form — it automatically gets embedded, classified, and stored in your database — you see a confirmation showing what was captured. Then an MCP server lets any AI assistant search your brain by meaning.
+A personal knowledge system with semantic search and an open protocol. You type a thought into a web form — it automatically gets embedded, classified, and stored in your database — you see a confirmation showing what was captured. Then an MCP server lets any AI assistant search your brain by meaning — and write to it directly.
 
 The key privacy features in this version:
 
@@ -85,7 +85,7 @@ GENERATED DURING SETUP
 
 **Part 1 — Capture (Steps 1–8):** Static HTML page (GitHub Pages) → JSON API (Edge Function) → Supabase. Type a thought, it gets embedded and classified automatically, you see the result on screen.
 
-**Part 2 — Retrieval (Steps 9–12):** Hosted MCP Server → Any AI. Connect Claude, ChatGPT, or any MCP client to your brain with a URL and a key that controls what they can see.
+**Part 2 — Retrieval & MCP Capture (Steps 9–12):** Hosted MCP Server → Any AI. Connect Claude, ChatGPT, or any MCP client to your brain with a URL and a key that controls what they can see. Any connected AI can also write thoughts directly — same pipeline as the web form.
 
 ---
 
@@ -288,6 +288,69 @@ end;
 $$;
 ```
 
+#### Create the List Function
+
+New query → paste and Run:
+
+```sql
+-- List thoughts with optional filters, all applied server-side.
+-- All filter parameters are optional; omitted filters are ignored.
+create or replace function list_thoughts_filtered(
+  result_count int default 10,
+  filter_type text default null,
+  filter_topic text default null,
+  filter_person text default null,
+  filter_days int default null,
+  content_pattern text default null,
+  visibility_filter text[] default null
+)
+returns table (
+  id uuid,
+  content text,
+  metadata jsonb,
+  submitted_by text,
+  evidence_basis text,
+  created_at timestamptz
+)
+language plpgsql
+as $$
+begin
+  return query
+  select
+    t.id,
+    t.content,
+    t.metadata,
+    t.submitted_by,
+    t.evidence_basis,
+    t.created_at
+  from thoughts t
+  where
+    -- Visibility: thought must have at least one matching tag
+    (visibility_filter is null
+      or t.metadata->'visibility' ?| visibility_filter)
+    -- Type filter
+    and (filter_type is null
+      or t.metadata->>'type' = filter_type)
+    -- Topic filter: topics array contains the value
+    and (filter_topic is null
+      or t.metadata->'topics' ? filter_topic)
+    -- Person filter: people array contains the value
+    and (filter_person is null
+      or t.metadata->'people' ? filter_person)
+    -- Days filter
+    and (filter_days is null
+      or t.created_at >= now() - (filter_days || ' days')::interval)
+    -- Regex filter on content (case-insensitive)
+    and (content_pattern is null
+      or t.content ~* content_pattern)
+  order by t.created_at desc
+  limit result_count;
+end;
+$$;
+```
+
+> This function powers the MCP server's `list_thoughts` tool, which supports filtering by type, topic, person, time range, and regex content matching. All filtering happens in Postgres — the regex uses Postgres's native `~*` (case-insensitive match) operator with the pattern bound as a parameter (not string-concatenated), so there is no injection risk.
+
 #### Lock Down Security
 
 One more new query:
@@ -305,7 +368,7 @@ create policy "Service role full access"
 
 #### Quick Verification
 
-**Table Editor** should show three tables: `thoughts`, `access_keys`, and `tag_rules`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts` and `validate_access_key`.
+**Table Editor** should show three tables: `thoughts`, `access_keys`, and `tag_rules`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts`, `validate_access_key`, and `list_thoughts_filtered`.
 
 ---
 
@@ -969,7 +1032,7 @@ The LLM should classify this with `health` in visibility. The tag rule engine sh
 
 ---
 
-## Part 2 — Retrieval
+## Part 2 — Retrieval & MCP Capture
 
 ### A Quick Note on Architecture
 
@@ -1036,7 +1099,7 @@ The visibility labels are set at capture time by the LLM. The default set is: `s
 
 ### Step 10: Deploy the MCP Server
 
-> **Change from original guide:** The original MCP server checked a single env-var key. This version looks up keys in the `access_keys` table and applies per-key filters to every query.
+> **Change from original guide:** The original MCP server checked a single env-var key and had four tools. This version keeps all four tools — semantic search, list with filters, stats, and capture — but looks up keys in the `access_keys` table and applies per-key filters to every read query. The capture tool runs the same embedding, metadata extraction, and tag-rule pipeline as the web form, and records provenance (who captured it and how). The list tool delegates all filtering — including regex content matching — to a Postgres RPC function (`list_thoughts_filtered`) rather than doing it client-side.
 
 #### Create the Function
 
@@ -1092,8 +1155,72 @@ async function getEmbedding(text: string): Promise<number[]> {
       input: text,
     }),
   });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
+  }
   const d = await r.json();
   return d.data[0].embedding;
+}
+
+async function extractMetadata(
+  text: string
+): Promise<Record<string, unknown>> {
+  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "openai/gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Extract metadata from the user's captured thought. Return JSON with:
+- "people": array of people mentioned (empty if none)
+- "action_items": array of implied to-dos (empty if none)
+- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
+- "topics": array of 1-3 short topic tags (always at least one)
+- "type": one of "observation", "task", "idea", "reference", "person_note"
+- "visibility": array of applicable labels from: "sfw", "personal", "work", "technical", "health", "financial", "relationship"
+  A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
+  Default to ["sfw"] if the thought is clearly innocuous.
+  Most thoughts should include "sfw" unless they contain genuinely private content.
+Only extract what's explicitly there.`,
+        },
+        { role: "user", content: text },
+      ],
+    }),
+  });
+  const d = await r.json();
+  try {
+    return JSON.parse(d.choices[0].message.content);
+  } catch {
+    return {
+      topics: ["uncategorized"],
+      type: "observation",
+      visibility: ["sfw"],
+    };
+  }
+}
+
+async function applyTagRules(visibility: string[]): Promise<string[]> {
+  const { data: rules, error } = await supabase
+    .from("tag_rules")
+    .select("if_present, remove_tag")
+    .eq("active", true);
+
+  if (error || !rules || rules.length === 0) return visibility;
+
+  let result = [...visibility];
+  for (const rule of rules) {
+    if (result.includes(rule.if_present)) {
+      result = result.filter((tag: string) => tag !== rule.remove_tag);
+    }
+  }
+  return result;
 }
 
 // --- Hono app with auth middleware ---
@@ -1211,137 +1338,330 @@ app.all("*", async (c) => {
     }
   );
 
-  // --- Tool: Browse Recent ---
+  // --- Tool: List Thoughts ---
   server.registerTool(
-    "browse_recent",
+    "list_thoughts",
     {
-      title: "Browse Recent Thoughts",
-      description: "Browse recently captured thoughts in reverse chronological order.",
+      title: "List Recent Thoughts",
+      description:
+        "List recently captured thoughts with optional filters by type, topic, person, time range, or content pattern.",
       inputSchema: {
         count: z
           .number()
           .min(1)
           .max(50)
           .default(10)
-          .describe("Number of recent thoughts to fetch"),
+          .describe("Number of thoughts to return"),
+        type: z
+          .string()
+          .optional()
+          .describe(
+            "Filter by type: observation, task, idea, reference, person_note"
+          ),
+        topic: z.string().optional().describe("Filter by topic tag"),
+        person: z
+          .string()
+          .optional()
+          .describe("Filter by person mentioned"),
+        days: z
+          .number()
+          .optional()
+          .describe("Only thoughts from the last N days"),
+        pattern: z
+          .string()
+          .optional()
+          .describe(
+            "Regex pattern to filter thought content (case-insensitive)"
+          ),
       },
     },
-    async ({ count }) => {
-      let query = supabase
-        .from("thoughts")
-        .select("id, content, metadata, submitted_by, evidence_basis, created_at")
-        .order("created_at", { ascending: false })
-        .limit(count || 10);
-
-      // Apply visibility filter from the access key
-      if (visFilter) {
-        query = query.or(
-          visFilter
-            .map((v: string) => `metadata->visibility.cs.["${v}"]`)
-            .join(",")
+    async ({ count, type, topic, person, days, pattern }) => {
+      try {
+        const { data, error } = await supabase.rpc(
+          "list_thoughts_filtered",
+          {
+            result_count: count || 10,
+            filter_type: type || null,
+            filter_topic: topic || null,
+            filter_person: person || null,
+            filter_days: days || null,
+            content_pattern: pattern || null,
+            visibility_filter: visFilter,
+          }
         );
-      }
 
-      const { data, error } = await query;
+        if (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error listing thoughts: ${error.message}`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
-      if (error) {
-        return {
-          content: [{ type: "text" as const, text: `Browse error: ${error.message}` }],
-        };
-      }
+        if (!data || data.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "No thoughts matched the given filters.",
+              },
+            ],
+          };
+        }
 
-      if (!data || data.length === 0) {
-        return {
-          content: [{ type: "text" as const, text: "No thoughts captured yet." }],
-        };
-      }
-
-      const results = data
-        .map(
-          (t: {
-            content: string;
-            metadata: Record<string, unknown>;
-            submitted_by: string;
-            evidence_basis: string;
-            created_at: string;
-          }) => {
+        const results = (data as {
+          content: string;
+          metadata: Record<string, unknown>;
+          submitted_by: string;
+          evidence_basis: string;
+          created_at: string;
+        }[])
+          .map((t, i) => {
             const meta = t.metadata || {};
             const date = new Date(t.created_at).toLocaleDateString();
-            let entry = `[${date} | by: ${t.submitted_by}] ${t.content}`;
-            if (t.evidence_basis && t.evidence_basis !== "user typed in web form")
-              entry += `\nSource: ${t.evidence_basis}`;
-            if (Array.isArray(meta.topics) && meta.topics.length > 0)
-              entry += `\nTopics: ${(meta.topics as string[]).join(", ")}`;
+            const tags = Array.isArray(meta.topics)
+              ? (meta.topics as string[]).join(", ")
+              : "";
+            let entry = `${i + 1}. [${date}] (${meta.type || "??"}${tags ? " — " + tags : ""}) [by: ${t.submitted_by}]\n   ${t.content}`;
+            if (
+              t.evidence_basis &&
+              t.evidence_basis !== "user typed in web form"
+            )
+              entry += `\n   Source: ${t.evidence_basis}`;
+            if (Array.isArray(meta.people) && meta.people.length > 0)
+              entry += `\n   People: ${(meta.people as string[]).join(", ")}`;
+            if (
+              Array.isArray(meta.action_items) &&
+              meta.action_items.length > 0
+            )
+              entry += `\n   Actions: ${(meta.action_items as string[]).join("; ")}`;
             return entry;
-          }
-        )
-        .join("\n\n---\n\n");
+          })
+          .join("\n\n");
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `${data.length} recent thoughts:\n\n${results}`,
-          },
-        ],
-      };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${data.length} thought(s):\n\n${results}`,
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${(err as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
 
-  // --- Tool: Stats ---
+  // --- Tool: Thought Stats ---
   server.registerTool(
-    "brain_stats",
+    "thought_stats",
     {
-      title: "Brain Stats",
+      title: "Thought Statistics",
       description:
-        "Get an overview of your stored thoughts — total count, recent activity, top topics.",
+        "Get a summary of stored thoughts: totals, types, top topics, and people mentioned.",
       inputSchema: {},
     },
     async () => {
-      // Total count (respecting visibility)
-      let countQuery = supabase
-        .from("thoughts")
-        .select("id", { count: "exact", head: true });
+      try {
+        // Fetch all metadata for visible thoughts
+        let query = supabase
+          .from("thoughts")
+          .select("metadata, created_at")
+          .order("created_at", { ascending: false });
 
-      if (visFilter) {
-        countQuery = countQuery.or(
-          visFilter
-            .map((v: string) => `metadata->visibility.cs.["${v}"]`)
-            .join(",")
-        );
+        if (visFilter) {
+          query = query.or(
+            visFilter
+              .map((v: string) => `metadata->visibility.cs.["${v}"]`)
+              .join(",")
+          );
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Stats error: ${error.message}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const total = data?.length ?? 0;
+
+        if (!data || total === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "No thoughts captured yet.",
+              },
+            ],
+          };
+        }
+
+        const types: Record<string, number> = {};
+        const topics: Record<string, number> = {};
+        const people: Record<string, number> = {};
+
+        for (const r of data) {
+          const m = (r.metadata || {}) as Record<string, unknown>;
+          if (m.type)
+            types[m.type as string] = (types[m.type as string] || 0) + 1;
+          if (Array.isArray(m.topics))
+            for (const t of m.topics)
+              topics[t as string] = (topics[t as string] || 0) + 1;
+          if (Array.isArray(m.people))
+            for (const p of m.people)
+              people[p as string] = (people[p as string] || 0) + 1;
+        }
+
+        const sort = (o: Record<string, number>): [string, number][] =>
+          Object.entries(o)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10);
+
+        const oldest = data[data.length - 1].created_at;
+        const newest = data[0].created_at;
+
+        const lines: string[] = [
+          `Total thoughts: ${total}`,
+          `Date range: ${new Date(oldest).toLocaleDateString()} → ${new Date(newest).toLocaleDateString()}`,
+          "",
+          "Types:",
+          ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
+        ];
+
+        if (Object.keys(topics).length) {
+          lines.push("", "Top topics:");
+          for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
+        }
+
+        if (Object.keys(people).length) {
+          lines.push("", "People mentioned:");
+          for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
+        }
+
+        lines.push("", `Key: ${keyRecord.key_name}`);
+
+        return {
+          content: [{ type: "text" as const, text: lines.join("\n") }],
+        };
+      } catch (err: unknown) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${(err as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
       }
+    }
+  );
 
-      const { count: total } = await countQuery;
+  // --- Tool: Capture Thought ---
+  server.registerTool(
+    "capture_thought",
+    {
+      title: "Capture Thought",
+      description:
+        "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to remember something — notes, insights, decisions, observations about people, or migrated content from other systems.",
+      inputSchema: {
+        content: z
+          .string()
+          .describe(
+            "The thought to capture — a clear, standalone statement that will make sense when retrieved later"
+          ),
+        evidence_basis: z
+          .string()
+          .optional()
+          .describe(
+            "How this information was sourced, e.g. 'summarized from meeting notes', 'user dictated'. Defaults to automatic provenance tracking."
+          ),
+      },
+    },
+    async ({ content, evidence_basis }) => {
+      try {
+        const [embedding, metadata] = await Promise.all([
+          getEmbedding(content),
+          extractMetadata(content),
+        ]);
 
-      // Most recent thought
-      let recentQuery = supabase
-        .from("thoughts")
-        .select("created_at")
-        .order("created_at", { ascending: false })
-        .limit(1);
+        // Apply deterministic tag rules
+        if (Array.isArray(metadata.visibility)) {
+          metadata.visibility = await applyTagRules(
+            metadata.visibility as string[]
+          );
+        }
 
-      if (visFilter) {
-        recentQuery = recentQuery.or(
-          visFilter
-            .map((v: string) => `metadata->visibility.cs.["${v}"]`)
-            .join(",")
-        );
+        const submittedBy = `mcp ${keyRecord.key_name}`;
+        const basis =
+          evidence_basis || `captured via MCP by ${keyRecord.key_name}`;
+
+        const { error } = await supabase.from("thoughts").insert({
+          content,
+          embedding,
+          metadata: { ...metadata, source: "mcp" },
+          submitted_by: submittedBy,
+          evidence_basis: basis,
+        });
+
+        if (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to capture: ${error.message}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const meta = metadata as Record<string, unknown>;
+        let confirmation = `Captured as ${meta.type || "thought"}`;
+        if (Array.isArray(meta.topics) && meta.topics.length)
+          confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
+        if (Array.isArray(meta.people) && meta.people.length)
+          confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
+        if (Array.isArray(meta.action_items) && meta.action_items.length)
+          confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+        if (Array.isArray(meta.visibility))
+          confirmation += ` | Visibility: ${(meta.visibility as string[]).join(", ")}`;
+
+        return {
+          content: [{ type: "text" as const, text: confirmation }],
+        };
+      } catch (err: unknown) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${(err as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
       }
-
-      const { data: recent } = await recentQuery;
-
-      const lastDate = recent?.[0]?.created_at
-        ? new Date(recent[0].created_at).toLocaleString()
-        : "never";
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Brain stats:\n- Total thoughts (visible to this key): ${total ?? 0}\n- Most recent: ${lastDate}\n\nKey: ${keyRecord.key_name}`,
-          },
-        ],
-      };
     }
   );
 
@@ -1434,10 +1754,17 @@ Ask your AI naturally. It picks the right tool automatically:
 | Prompt | Tool Used |
 |---|---|
 | "What did I capture about career changes?" | Semantic search |
-| "What did I capture this week?" | Browse recent |
-| "How many thoughts do I have?" | Stats overview |
+| "What did I capture this week?" | List (days filter) |
+| "How many thoughts do I have?" | Stats |
 | "Find my notes about the API redesign" | Semantic search |
-| "Show me my recent ideas" | Browse recent |
+| "Show me my recent ideas" | List (type filter) |
+| "Who do I mention most?" | Stats |
+| "Show me thoughts mentioning Sarah" | List (person filter) |
+| "Find thoughts matching 'Q[1-4] revenue'" | List (regex pattern) |
+| "Save this: decided to move the launch to March 15 because of the QA blockers" | Capture thought |
+| "Remember that Marcus wants to move to the platform team" | Capture thought |
+
+> The capture tool means you're not limited to the web form for input. Any MCP-connected AI can write directly to your brain — Claude Desktop, ChatGPT, Claude Code, Cursor. Wherever you're working, you can save a thought without switching apps. Captured thoughts go through the same embedding, metadata extraction, and tag-rule pipeline as the web form. The `submitted_by` field records which MCP key was used, and `evidence_basis` defaults to automatic provenance tracking but can be overridden by the AI (e.g., "summarized from meeting notes").
 
 ---
 
@@ -1628,11 +1955,21 @@ where metadata->'visibility' is null;
 
 First call on a cold function takes a few seconds (Edge Function waking up). Subsequent calls are faster. If consistently slow, check your Supabase project region.
 
+**Capture tool saves but metadata is wrong**
+
+The metadata extraction is best-effort — the LLM is making its best guess from limited context. The embedding is what powers semantic search, and that works regardless of how the metadata gets classified. You can always override visibility manually on the web form, or adjust the system prompt in the MCP server's `extractMetadata` function to give the LLM better instructions for your content.
+
+**List tool regex returns an error**
+
+The `pattern` parameter uses Postgres's `~*` operator (POSIX regex, case-insensitive). Syntax is slightly different from JavaScript regex. Common gotchas: `\b` for word boundaries isn't supported (use `\y` instead), and `\d` works but `\w` may not match Unicode as expected. If in doubt, stick to simple patterns like `Q[1-4]|revenue` or `sarah.*job`.
+
 ---
 
 ## How It Works Under the Hood
 
 When you type a thought in the form: the GitHub Pages site sends a JSON request to the capture Edge Function → the function generates an embedding (1536-dimensional vector of meaning) AND extracts metadata via LLM in parallel → deterministic tag rules are applied → everything is stored as a single row in Supabase along with the submitter identity (`user`) and evidence basis (`user typed in web form`) → the function returns JSON → the page renders a confirmation showing what was captured.
+
+When your AI captures a thought via MCP: your AI client calls the `capture_thought` tool with the text (and optionally an `evidence_basis` describing how the information was sourced) → the MCP server runs the same pipeline as the web form — embedding and metadata extraction in parallel, then deterministic tag rules → the thought is stored with `submitted_by` set to `mcp {key-name}` and `evidence_basis` set to either the provided value or automatic provenance tracking → confirmation returned to your AI. The capturing key's visibility filter does not constrain what can be captured — it only filters reads.
 
 When you ask your AI about it: your AI client sends the query to the MCP Edge Function → the function validates your access key and loads its filter rules → generates an embedding of your question → Supabase matches it against stored thoughts by vector similarity, filtered by the key's visibility rules → results come back ranked by meaning, not keywords, with provenance information (who submitted it and how) included.
 
@@ -1650,9 +1987,11 @@ A personal knowledge system where:
 
 - Thoughts go from your browser directly to your database — no third-party chat platform involved
 - The capture UI is a static HTML page served from GitHub Pages; the processing logic is a separate JSON API Edge Function
+- Any MCP-connected AI can also capture thoughts directly — same embedding, classification, and tag-rule pipeline as the web form, with automatic provenance tracking
 - Every thought gets semantic embeddings and automatic metadata including visibility classification
 - Every thought records who submitted it and how the information was sourced, laying groundwork for provenance tracking
 - Deterministic tag rules enforce privacy boundaries regardless of LLM classification
+- Thoughts can be listed with structured filters (type, topic, person, time range) and regex content matching, all evaluated server-side in Postgres
 - Multiple AI agents can connect via MCP, each seeing only what their key allows
 - Keys are tracked and independently revocable
 - Everything runs on Supabase's free tier with no local servers to maintain
