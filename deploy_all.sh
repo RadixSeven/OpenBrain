@@ -1,9 +1,8 @@
 #!/bin/bash
 # Run this to redeploy everything to Supabase.
-# You must have run `supabase login` and `supabase link` before running this.
+# You must have run `supabase login`, `supabase link`, and
+# set SUPABASE_DB_PASSWORD (in Lastpass) before running this.
 
 supabase functions deploy capture-api --no-verify-jwt
-supabase storage cp public-site/capture.html \
-    ss:///public-site/capture.html \
-    --content-type text/html \
-    --experimental
+supabase functions deploy open-brain-mcp --no-verify-jwt
+supabase db push
