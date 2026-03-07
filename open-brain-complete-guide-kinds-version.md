@@ -13,6 +13,7 @@ The key privacy features in this version:
 - **No Slack.** Your thoughts go directly from a password-protected web form to your database. No third-party chat platform sees them.
 - **Filtered access.** Each MCP access key maps to a filter profile. You can give a work agent a key that only sees thoughts tagged "sfw," while your personal setup sees everything.
 - **Multiple secrets.** Different agents get different keys, stored in your database. You can name them, track usage, and revoke them independently.
+- **Works with every MCP client.** Clients that support custom headers use the `x-brain-key` header. Clients that don't (Claude Desktop, Claude Web, ChatGPT Web) pass the key as a URL query parameter instead, using dedicated keys that are easy to audit and revoke as a group.
 
 ### What You Need
 
@@ -1084,6 +1085,23 @@ insert into access_keys (name, key, filters) values (
 
 This key only returns thoughts whose `visibility` metadata array contains at least one of `sfw`, `work`, or `technical`.
 
+**URL-exposed key (for clients that can't set custom headers):**
+
+Some clients — Claude Desktop, Claude Web (claude.ai), and OpenAI's ChatGPT web interface — can't send custom HTTP headers. For these, the MCP server also accepts the key as a `?key=` URL query parameter. This is less secure than a header (URLs can appear in browser history, server logs, and referrer headers), so use a dedicated key with a name containing `-in-url-` to make URL-exposed keys easy to audit and revoke as a group:
+
+```sql
+insert into access_keys (name, key, filters) values (
+  'claude-desktop-in-url-sfw',
+  'PASTE-A-DIFFERENT-64-CHAR-KEY-HERE',
+  '{"visibility": ["sfw", "work", "technical"]}'::jsonb
+);
+```
+
+> **Security note:** Never reuse a header-based key in a URL. Generate a separate key for each URL-based agent. If a URL-based key leaks, you can revoke all of them at once:
+> ```sql
+> update access_keys set active = false where name like '%-in-url-%';
+> ```
+
 #### Other Filter Examples
 
 | Filter | Meaning |
@@ -1228,10 +1246,12 @@ async function applyTagRules(visibility: string[]): Promise<string[]> {
 const app = new Hono().basePath("/open-brain-mcp");
 
 app.all("*", async (c) => {
-  // 1. Extract and validate the access key
-  const brainKey = c.req.header("x-brain-key");
+  // 1. Extract and validate the access key (header preferred, URL fallback)
+  const brainKey =
+    c.req.header("x-brain-key") ||
+    new URL(c.req.url).searchParams.get("key");
   if (!brainKey) {
-    return c.json({ error: "Missing x-brain-key header" }, 401);
+    return c.json({ error: "Missing x-brain-key header or ?key= param" }, 401);
   }
 
   const { data: keyData, error: keyError } = await supabase.rpc(
@@ -1694,15 +1714,11 @@ Paste this into your credential tracker as the **MCP Server URL**.
 
 You need two things from your credential tracker: the MCP Server URL (Step 10) and the access key(s) you generated (Step 9). Each agent gets its own key. The URL is the same for all of them — the key determines what they can see.
 
-#### Claude Desktop
-
-Settings → Developer → Edit Config
-
-Does not work - only supports OAuth, no auth, and STDIO
-
-If it worked, the next instruction would be to restart Claude Desktop. Then you would see "open-brain" appear in the MCP tools indicator (the hammer icon).
+There are two ways to pass the key: in an `x-brain-key` HTTP header (preferred) or as a `?key=` URL query parameter (for clients that can't set custom headers). Use a dedicated `-in-url-` key for the URL approach — see Step 9.
 
 #### Claude Code
+
+Supports custom headers natively:
 
 ```bash
 claude mcp add open-brain \
@@ -1730,9 +1746,38 @@ Same config pattern, different key:
 }
 ```
 
-#### Other Clients (Cursor, VS Code Copilot, ChatGPT Desktop, Windsurf)
+#### Claude Desktop
 
-Every MCP-compatible client follows the same pattern: point it at the URL with the `x-brain-key` header. Check their MCP documentation for where to add remote HTTP servers with custom headers.
+Claude Desktop only supports OAuth, no-auth, and STDIO for MCP — it can't send custom headers on remote HTTP servers. Use the URL query parameter approach with a dedicated `-in-url-` key:
+
+Settings → Developer → Edit Config:
+
+```json
+{
+  "mcpServers": {
+    "open-brain": {
+      "type": "streamable-http",
+      "url": "https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=your-in-url-key-here"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. You should see "open-brain" appear in the MCP tools indicator (the hammer icon).
+
+#### Claude Web (claude.ai) and OpenAI Web (ChatGPT)
+
+These browser-based clients also can't set custom headers. Use the same URL query parameter approach with a dedicated `-in-url-` key:
+
+```
+https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=your-in-url-key-here
+```
+
+Add this as a remote MCP server in the client's settings. For Claude Web, go to Settings → Connected MCP Servers. For ChatGPT, check OpenAI's current MCP documentation for where to add remote servers.
+
+#### Other Clients (Cursor, VS Code Copilot, Windsurf)
+
+If the client supports custom headers, use the `x-brain-key` header approach. If not, use the `?key=` URL approach with a dedicated `-in-url-` key. Check the client's MCP documentation for where to add remote HTTP servers.
 
 ---
 
@@ -1791,6 +1836,23 @@ update access_keys set active = false where name = 'work-copilot';
 
 ```sql
 delete from access_keys where name = 'old-agent';
+```
+
+### Audit URL-exposed keys
+
+Keys passed via URL query parameter are higher risk. If you followed the naming convention, you can see them all:
+
+```sql
+select name, active, last_used_at, filters
+from access_keys
+where name like '%-in-url-%'
+order by last_used_at desc;
+```
+
+Revoke all URL-exposed keys at once if you suspect a leak:
+
+```sql
+update access_keys set active = false where name like '%-in-url-%';
 ```
 
 ---
@@ -1909,7 +1971,8 @@ Check that your URL is exactly right — including `https://` and no trailing sl
 The access key doesn't match any active key in the `access_keys` table. Verify that:
 1. The key you're using matches what's stored in the `key` column
 2. The key's `active` column is `true`
-3. The header name is `x-brain-key` (lowercase, with the dash)
+3. The key is being sent as either the `x-brain-key` header (lowercase, with the dash) or the `?key=` URL query parameter — the server checks both, header first
+4. If using the URL approach, make sure the key isn't being URL-encoded incorrectly (hex strings are URL-safe, so this shouldn't happen with `openssl rand -hex 32` keys)
 
 You can test key validation directly:
 
