@@ -103,10 +103,12 @@ async function applyTagRules(visibility: string[]): Promise<string[]> {
 const app = new Hono().basePath("/open-brain-mcp");
 
 app.all("*", async (c) => {
-  // 1. Extract and validate the access key
-  const brainKey = c.req.header("x-brain-key");
+  // 1. Extract and validate the access key (header preferred, URL fallback)
+  const brainKey =
+      c.req.header("x-brain-key") ||
+      new URL(c.req.url).searchParams.get("key");
   if (!brainKey) {
-    return c.json({ error: "Missing x-brain-key header" }, 401);
+    return c.json({ error: "Missing x-brain-key header or ?key= param" }, 401);
   }
 
   const { data: keyData, error: keyError } = await supabase.rpc(
@@ -459,7 +461,7 @@ app.all("*", async (c) => {
       {
         title: "Capture Thought",
         description:
-            "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to remember something — notes, insights, decisions, observations about people, or migrated content from other systems.",
+            "Save a new thought to the Open Brain, extracting metadata automatically. Use this when the user wants to remember something — notes, insights, decisions, observations about people, or migrated content from other systems. Or you think you may need to remember something in the future.",
         inputSchema: {
           content: z
               .string()
