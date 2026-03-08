@@ -1746,34 +1746,28 @@ Same config pattern, different key:
 }
 ```
 
-#### Claude Desktop
+#### Claude Desktop and Claude Web (claude.ai)
 
 Claude Desktop only supports OAuth, no-auth, and STDIO for MCP — it can't send custom headers on remote HTTP servers. Use the URL query parameter approach with a dedicated `-in-url-` key:
 
-Settings → Developer → Edit Config:
+It shares its configuration with Claude Web.
 
-```json
-{
-  "mcpServers": {
-    "open-brain": {
-      "type": "streamable-http",
-      "url": "https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=your-in-url-key-here"
-    }
-  }
-}
-```
+Settings → Connectors (soon to be "Customize") → Add custom connector
 
-Restart Claude Desktop. You should see "open-brain" appear in the MCP tools indicator (the hammer icon).
+Under the "Name" field, enter "Open Brain"
+Under URL: https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=your-in-url-key-here
 
-#### Claude Web (claude.ai) and OpenAI Web (ChatGPT)
+Open a new conversation. You should see "Open Brain" appear in the connector list.
 
-These browser-based clients also can't set custom headers. Use the same URL query parameter approach with a dedicated `-in-url-` key:
+#### OpenAI Web (ChatGPT)
+
+This browser-based client also can't set custom headers. Use the same URL query parameter approach with a dedicated `-in-url-` key:
 
 ```
 https://YOUR_PROJECT_REF.supabase.co/functions/v1/open-brain-mcp?key=your-in-url-key-here
 ```
 
-Add this as a remote MCP server in the client's settings. For Claude Web, go to Settings → Connected MCP Servers. For ChatGPT, check OpenAI's current MCP documentation for where to add remote servers.
+Add this as a remote MCP server in the client's settings. Check OpenAI's current MCP documentation for where to add remote servers.
 
 #### Other Clients (Cursor, VS Code Copilot, Windsurf)
 
