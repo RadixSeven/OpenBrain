@@ -55,7 +55,7 @@ async function extractMetadata(
   - "topics": array of 1-3 short topic tags (always at least one)
   - "type": one of "observation", "task", "idea", "reference", "person_note"
   - "visibility": array of applicable labels from: "sfw", "personal", "work",
-    "technical", "health", "financial", "romantic_or_sexual_relationship",
+    "technical", "health", "financial", "romantic_or_sexual_relationship", "religion",
     "family_relationship", "other_relationship", "lgbtq_identity", "activism"
     A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
     The user has two names: Eric David Moyer and Kind Loving Truth. Anything mentioning the name Kind Loving Truth
