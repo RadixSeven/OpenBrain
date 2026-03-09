@@ -76,7 +76,7 @@ async function extractMetadata(
     return {
       topics: ["uncategorized"],
       type: "observation",
-      visibility: ["sfw"],
+      visibility: ["uncategorized"],
     };
   }
 }
