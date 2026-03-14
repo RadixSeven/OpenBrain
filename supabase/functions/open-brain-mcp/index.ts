@@ -43,7 +43,7 @@ async function extractMetadata(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-opus-4.6",
+      model: "openai/gpt-5.2",
       response_format: { type: "json_object" },
       messages: [
         {
