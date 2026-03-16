@@ -1,0 +1,38 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-json
+      - id: check-toml
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
+    hooks:
+      - id: mypy
+        pass_filenames: false
+        args: [--strict, src/fluxx, tests]
+        additional_dependencies:
+          - matplotlib>=3.10.8
+          - tokenize-rt>=3.2.0
+          - pyomo>=6.7.0
+          - pydantic
+          - PySide6-stubs
+          - pytest
+          - pytest-qt
+          - scipy
+          - scipy-stubs
+          - types-networkx
+          - rapidfuzz
+          - numpy
+          - requests
+          - types-requests
