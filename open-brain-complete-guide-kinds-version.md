@@ -135,8 +135,22 @@ create table thoughts (
     -- Examples: 'user typed in web form', 'SuperWorldModel27 summarized from audio',
     -- 'extracted from PDF upload', 'daily journal prompt response'
   created_at timestamptz default now(),
-  updated_at timestamptz default now()
+  updated_at timestamptz default now(),
+  visibility_verified_by_human_at timestamptz default null
+    -- Timestamp when a human most recently verified the LLM-assigned visibility labels.
+    -- NULL means unverified. Set by a separate UI/workflow, not by capture.
 );
+
+-- Column documentation
+comment on column thoughts.id is 'Unique identifier for the thought (auto-generated UUID)';
+comment on column thoughts.content is 'The raw text content of the thought as entered by the user or agent';
+comment on column thoughts.embedding is 'Vector embedding (1536-dim) of the content, used for semantic similarity search';
+comment on column thoughts.metadata is 'LLM-extracted structured metadata: type, topics, people, action_items, dates_mentioned, visibility, source';
+comment on column thoughts.submitted_by is 'Who submitted the thought (e.g. user, agent name)';
+comment on column thoughts.evidence_basis is 'How this thought was captured (e.g. user typed in web form, dictated via MCP)';
+comment on column thoughts.created_at is 'Timestamp when the thought was first created';
+comment on column thoughts.updated_at is 'Timestamp when the thought was last modified';
+comment on column thoughts.visibility_verified_by_human_at is 'Timestamp when a human most recently verified the LLM-assigned visibility labels. NULL means unverified';
 ```
 
 > **Design note on truth maintenance.** A memory isn't just a collection of statements — it's a collection of statements that need pruning and updating. There are several distinct ways a stored thought can be or become wrong:
@@ -153,7 +167,7 @@ create table thoughts (
 > - A `confidence` or `expected_shelf_life` field set at capture time — the LLM could estimate whether a thought describes a transient state or a durable fact.
 > - A periodic review process that surfaces old transient thoughts for re-evaluation.
 >
-> None of this is implemented here. The schema is designed so these additions are non-breaking — they're new columns with defaults or new tables with foreign keys into `thoughts`. The important thing for now is that `submitted_by` and `evidence_basis` are always populated, giving future tooling something to work with.
+> None of this is implemented here yet. The `visibility_verified_by_human_at` column is a step in this direction — it tracks whether a human has reviewed the LLM-assigned visibility labels (NULL means unverified). The schema is designed so further additions are non-breaking — they're new columns with defaults or new tables with foreign keys into `thoughts`. The important thing for now is that `submitted_by`, `evidence_basis`, and `visibility_verified_by_human_at` are always populated or meaningfully defaulted, giving future tooling something to work with.
 
 #### Create the Access Keys Table
 
@@ -369,7 +383,7 @@ create policy "Service role full access"
 
 #### Quick Verification
 
-**Table Editor** should show three tables: `thoughts`, `access_keys`, and `tag_rules`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts`, `validate_access_key`, and `list_thoughts_filtered`.
+**Table Editor** should show three tables: `thoughts`, `access_keys`, and `tag_rules`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at, visibility_verified_by_human_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts`, `validate_access_key`, and `list_thoughts_filtered`.
 
 ---
 
