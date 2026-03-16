@@ -297,6 +297,7 @@ pants-sandbox-*/
 # uv (developer tooling)
 .venv/
 .uv_cache/
+.uv-cache/
 
 # pre-commit (cache redirected from ~/.cache/pre-commit for sandbox)
 .pre-commit-cache/
