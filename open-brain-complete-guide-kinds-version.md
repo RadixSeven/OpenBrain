@@ -381,9 +381,74 @@ create policy "Service role full access"
   using (auth.role() = 'service_role');
 ```
 
+#### Prompt Templates (Version-Tracked Prompts)
+
+These two tables let you version and swap prompts without redeploying edge functions. The edge functions fetch the current prompt from the database at runtime.
+
+```sql
+-- Stores every prompt version with its target model
+create table prompt_templates (
+  id uuid primary key default gen_random_uuid(),
+  prompt_type text not null,
+  model_string text not null,
+  prompt_template_text text not null,
+  created_at timestamptz not null default now()
+);
+
+comment on table prompt_templates is 'Stores all prompt template versions, each paired with the model it was designed/optimized for';
+
+-- Append-only log of which template is active per type
+create table current_prompt (
+  id uuid primary key default gen_random_uuid(),
+  prompt_type text not null,
+  prompt_template_id uuid not null references prompt_templates(id),
+  starting_at timestamptz not null default now(),
+  note text
+);
+
+create index idx_current_prompt_type_start on current_prompt(prompt_type, starting_at desc);
+
+comment on table current_prompt is 'Append-only history of which prompt template is active for each prompt type. Query latest starting_at per prompt_type to get current.';
+
+-- RLS: service_role only
+alter table prompt_templates enable row level security;
+alter table current_prompt enable row level security;
+
+create policy "Service role full access" on prompt_templates for all using (true) with check (true);
+create policy "Service role full access" on current_prompt for all using (true) with check (true);
+
+-- Function to get the current prompt for a given type
+create or replace function get_current_prompt(p_type text)
+returns table(prompt_template_text text, model_string text, prompt_template_id uuid) as $$
+  select pt.prompt_template_text, pt.model_string, pt.id
+  from current_prompt cp
+  join prompt_templates pt on pt.id = cp.prompt_template_id
+  where cp.prompt_type = p_type
+  order by cp.starting_at desc
+  limit 1;
+$$ language sql security definer;
+```
+
+Seed the initial categorization prompt (this is the same prompt that was previously hardcoded in the edge functions):
+
+```sql
+insert into prompt_templates (id, prompt_type, model_string, prompt_template_text)
+values (
+  'a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e4',
+  'categorization',
+  'openai/gpt-5.2',
+  E'Extract metadata from the user''s captured thought. Return JSON with:\n- "people": array of people mentioned (empty if none)\n- "action_items": array of implied to-dos (empty if none)\n- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)\n- "topics": array of 1-3 short topic tags (always at least one)\n- "type": one of "observation", "task", "idea", "reference", "person_note"\n- "visibility": array of applicable labels from: "sfw", "personal", "work",\n  "technical", "health", "financial", "romantic_or_sexual_relationship", "religion",\n  "family_relationship", "other_relationship", "lgbtq_identity", "activism"\n  A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.\n  The user has two names: Eric David Moyer and Kind Loving Truth. Anything mentioning the name Kind Loving Truth\n  (or just Kind or Kind Truth) is private and not safe for work (should not have the "sfw" label).\n  Anything related the user''s LGBTQIA+ identity is private and not safe for work.\n  Default to ["sfw"] if the thought is clearly innocuous.\n  Thoughts labels should include "sfw" unless they contain genuinely private content.\nOnly extract what''s explicitly there.'
+);
+
+insert into current_prompt (prompt_type, prompt_template_id, note)
+values ('categorization', 'a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e4', 'Initial seed from hardcoded prompt');
+```
+
+To swap to a new prompt later, just insert a new row into `prompt_templates` and a new row into `current_prompt` pointing to it. The edge functions will pick it up on the next request.
+
 #### Quick Verification
 
-**Table Editor** should show three tables: `thoughts`, `access_keys`, and `tag_rules`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at, visibility_verified_by_human_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts`, `validate_access_key`, and `list_thoughts_filtered`.
+**Table Editor** should show five tables: `thoughts`, `access_keys`, `tag_rules`, `prompt_templates`, and `current_prompt`. The `thoughts` table should have columns: id, content, embedding, metadata, submitted_by, evidence_basis, created_at, updated_at, visibility_verified_by_human_at. The `tag_rules` table should have your seeded rules (check that they look right). **Database → Functions** should show `match_thoughts`, `validate_access_key`, `list_thoughts_filtered`, and `get_current_prompt`.
 
 ---
 
@@ -529,6 +594,15 @@ async function getEmbedding(text: string): Promise<number[]> {
 async function extractMetadata(
   text: string
 ): Promise<Record<string, unknown>> {
+  // Fetch current prompt and model from DB
+  const { data: promptData, error: promptError } = await supabase
+    .rpc('get_current_prompt', { p_type: 'categorization' })
+    .single();
+
+  if (promptError || !promptData) {
+    throw new Error('Failed to fetch categorization prompt from database');
+  }
+
   const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -536,22 +610,12 @@ async function extractMetadata(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
+      model: promptData.model_string,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned (empty if none)
-- "action_items": array of implied to-dos (empty if none)
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
-- "visibility": array of applicable labels from: "sfw", "personal", "work", "technical", "health", "financial", "relationship"
-  A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
-  Default to ["sfw"] if the thought is clearly innocuous.
-  Most thoughts should include "sfw" unless they contain genuinely private content.
-Only extract what's explicitly there.`,
+          content: promptData.prompt_template_text,
         },
         { role: "user", content: text },
       ],
@@ -1198,6 +1262,15 @@ async function getEmbedding(text: string): Promise<number[]> {
 async function extractMetadata(
   text: string
 ): Promise<Record<string, unknown>> {
+  // Fetch current prompt and model from DB
+  const { data: promptData, error: promptError } = await supabase
+    .rpc('get_current_prompt', { p_type: 'categorization' })
+    .single();
+
+  if (promptError || !promptData) {
+    throw new Error('Failed to fetch categorization prompt from database');
+  }
+
   const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -1205,22 +1278,12 @@ async function extractMetadata(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
+      model: promptData.model_string,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned (empty if none)
-- "action_items": array of implied to-dos (empty if none)
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
-- "visibility": array of applicable labels from: "sfw", "personal", "work", "technical", "health", "financial", "relationship"
-  A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
-  Default to ["sfw"] if the thought is clearly innocuous.
-  Most thoughts should include "sfw" unless they contain genuinely private content.
-Only extract what's explicitly there.`,
+          content: promptData.prompt_template_text,
         },
         { role: "user", content: text },
       ],

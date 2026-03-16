@@ -4,6 +4,6 @@
 # set SUPABASE_DB_PASSWORD environtment variable
 # (stored in Lastpass and ~/.env) before running this.
 
+supabase db push
 supabase functions deploy capture-api --no-verify-jwt
 supabase functions deploy open-brain-mcp --no-verify-jwt
-supabase db push

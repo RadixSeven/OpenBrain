@@ -36,6 +36,15 @@ async function getEmbedding(text: string): Promise<number[]> {
 async function extractMetadata(
     text: string
 ): Promise<Record<string, unknown>> {
+  // Fetch current prompt and model from DB
+  const { data: promptData, error: promptError } = await supabase
+    .rpc('get_current_prompt', { p_type: 'categorization' })
+    .single();
+
+  if (promptError || !promptData) {
+    throw new Error('Failed to fetch categorization prompt from database');
+  }
+
   const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -43,27 +52,12 @@ async function extractMetadata(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-5.2",
+      model: promptData.model_string,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-  - "people": array of people mentioned (empty if none)
-  - "action_items": array of implied to-dos (empty if none)
-  - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-  - "topics": array of 1-3 short topic tags (always at least one)
-  - "type": one of "observation", "task", "idea", "reference", "person_note"
-  - "visibility": array of applicable labels from: "sfw", "personal", "work",
-    "technical", "health", "financial", "romantic_or_sexual_relationship", "religion",
-    "family_relationship", "other_relationship", "lgbtq_identity", "activism"
-    A thought can have multiple labels. "sfw" means safe for a work context with no private/sensitive content.
-    The user has two names: Eric David Moyer and Kind Loving Truth. Anything mentioning the name Kind Loving Truth
-    (or just Kind or Kind Truth) is private and not safe for work (should not have the "sfw" label).
-    Anything related the user's LGBTQIA+ identity is private and not safe for work.
-    Default to ["sfw"] if the thought is clearly innocuous.
-    Thoughts labels should include "sfw" unless they contain genuinely private content.
-  Only extract what's explicitly there.`
+          content: promptData.prompt_template_text,
         },
         { role: "user", content: text },
       ],
