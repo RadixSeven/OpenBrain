@@ -1,0 +1,39 @@
+[project]
+name = "review-visibility"
+version = "0.1.0"
+description = "TUI for reviewing and verifying LLM-assigned visibility tags on thoughts"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "pytest-cov>=7.0.0",
+    "textual>=8.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [".venv/*"]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+exclude_lines = [
+    "if __name__ == .__main__.",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+    "respx>=0.22.0",
+    "ruff>=0.15.7",
+]

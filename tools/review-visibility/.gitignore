@@ -1,0 +1,8 @@
+.scan_cache.json
+.venv/
+htmlcov/
+
+# Temporary files created by pytest - found in the repo
+# becaus TMPDIR needs to be in the repo for it to be
+# inside agent sandboxes
+pytest-of-*/

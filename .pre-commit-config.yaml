@@ -20,19 +20,10 @@ repos:
     hooks:
       - id: mypy
         pass_filenames: false
-        args: [--strict, src/fluxx, tests]
+        args: [--strict, tools/review-visibility/src, tools/review-visibility/tests]
         additional_dependencies:
-          - matplotlib>=3.10.8
-          - tokenize-rt>=3.2.0
-          - pyomo>=6.7.0
-          - pydantic
-          - PySide6-stubs
+          - httpx
+          - textual
           - pytest
-          - pytest-qt
-          - scipy
-          - scipy-stubs
-          - types-networkx
-          - rapidfuzz
-          - numpy
-          - requests
-          - types-requests
+          - pytest-asyncio
+          - respx
