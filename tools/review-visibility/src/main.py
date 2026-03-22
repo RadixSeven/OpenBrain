@@ -23,10 +23,10 @@ from models import (
     Thought,
     ThoughtMetadata,
 )
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -541,6 +541,117 @@ class ReviewScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ThoughtDetailScreen(ModalScreen[str | None]):
+    """Read-focused detail view for a single thought."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+    ]
+
+    CSS = """
+    ThoughtDetailScreen {
+        align: center middle;
+    }
+    #detail-dialog {
+        width: 90%;
+        height: 85%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #detail-header {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #detail-meta {
+        height: auto;
+        margin-bottom: 1;
+        background: $boost;
+        padding: 1;
+    }
+    #detail-content-scroll {
+        height: 1fr;
+        margin-bottom: 1;
+    }
+    #detail-content {
+        height: auto;
+        padding: 1;
+    }
+    #detail-buttons {
+        height: 3;
+        align: center middle;
+    }
+    #detail-buttons Button {
+        margin: 0 2;
+    }
+    """
+
+    def __init__(
+        self,
+        thought: Thought,
+        new_meta: ThoughtMetadata | None,
+        tag_rules: list[TagRule],
+        config: Config,
+    ) -> None:
+        super().__init__()
+        self.thought = thought
+        self.new_meta = new_meta
+        self.tag_rules = tag_rules
+        self.config = config
+
+    def compose(self) -> ComposeResult:
+        old_vis = sorted(self.thought.metadata.visibility)
+        created = self.thought.created_at[:19]
+        verified = self.thought.visibility_verified_by_human_at
+        verified_str = verified[:19] if verified else "never"
+        thought_type = self.thought.metadata.type
+        submitted = self.thought.submitted_by or "unknown"
+        topics = ", ".join(self.thought.metadata.topics) or "(none)"
+
+        with Vertical(id="detail-dialog"):
+            yield Label(
+                f"[b]Created:[/b] {created}  [b]Type:[/b] {thought_type}"
+                f"  [b]By:[/b] {submitted}  [b]Verified:[/b] {verified_str}",
+                id="detail-header",
+                markup=True,
+            )
+
+            meta_lines = [
+                f"[b]Topics:[/b] {topics}",
+                f"[b]Current visibility:[/b] {', '.join(old_vis) or '(none)'}",
+            ]
+            if self.new_meta is not None:
+                new_vis = sorted(
+                    apply_tag_rules(sorted(self.new_meta.visibility), self.tag_rules)
+                )
+                diff_status = "match" if old_vis == new_vis else "DIFF"
+                meta_lines.append(
+                    f"[b]New visibility:[/b] {', '.join(new_vis) or '(none)'}"
+                    f"  [{diff_status}]"
+                )
+
+            yield Static(
+                "\n".join(meta_lines),
+                id="detail-meta",
+                markup=True,
+            )
+
+            with VerticalScroll(id="detail-content-scroll"):
+                yield Static(self.thought.content, id="detail-content")
+
+            with Horizontal(id="detail-buttons"):
+                yield Button("Review", id="btn-review", variant="primary")
+                yield Button("Close", id="btn-close")
+
+    @on(Button.Pressed, "#btn-review")
+    def on_review(self) -> None:
+        self.dismiss("review")
+
+    @on(Button.Pressed, "#btn-close")
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class VisibilityReviewApp(App[None]):
     """Main TUI for reviewing visibility tags."""
 
@@ -617,16 +728,23 @@ class VisibilityReviewApp(App[None]):
         except Exception as exc:
             self.call_from_thread(status.update, f"Error: {exc}")
 
-    def _populate_table(self) -> None:
+    def _populate_table(self, *, width_override: int | None = None) -> None:
         table = self.query_one("#main-table", DataTable)
         table.clear(columns=True)
         table.add_columns("Created", "Content", "Current Vis", "New Vis", "Status")
         table.cursor_type = "row"
 
+        # Other columns: Created(10) + Vis(~20) + NewVis(~20) + Status(8) + seps ≈ 70
+        width = width_override if width_override is not None else self.size.width
+        content_max = max(20, width - 70)
+
         for t in self.thoughts:
             old_vis = sorted(t.metadata.visibility)
             created = t.created_at[:10]
-            content = (t.content[:80] + "\u2026") if len(t.content) > 80 else t.content
+            flat = " ".join(t.content.split())
+            content = (
+                (flat[:content_max] + "\u2026") if len(flat) > content_max else flat
+            )
 
             new_vis: list[str] = []
             if t.id in self.scan_results:
@@ -727,6 +845,18 @@ class VisibilityReviewApp(App[None]):
         if not thought:
             return
         new_meta = self.scan_results.get(thought.id)
+        self.push_screen(
+            ThoughtDetailScreen(thought, new_meta, self.tag_rules, self.config),
+            callback=self._on_detail_done,
+        )
+
+    def _on_detail_done(self, result: str | None) -> None:
+        if result != "review":
+            return
+        thought = self._get_selected_thought()
+        if not thought:
+            return
+        new_meta = self.scan_results.get(thought.id)
         if not new_meta:
             self._scan_and_review(thought)
             return
@@ -802,6 +932,10 @@ class VisibilityReviewApp(App[None]):
         self._on_review_done(result)
         if result is not None:
             self._review_next_diff()
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self.thoughts:
+            self._populate_table(width_override=event.size.width)
 
     def action_refresh(self) -> None:
         self._load_data()

@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import respx
-from main import ReviewScreen, VisibilityReviewApp
+from main import ReviewScreen, ThoughtDetailScreen, VisibilityReviewApp
 from models import Config, Thought, ThoughtMetadata
-from textual.widgets import DataTable, Label, TextArea
+from textual.widgets import DataTable, Label, Static, TextArea
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -559,7 +559,7 @@ class TestVisibilityReviewApp:
 
     @respx.mock
     async def test_action_review_selected_with_scan_result(self) -> None:
-        """When thought is already scanned, pushes ReviewScreen directly."""
+        """When thought is already scanned, pushes ThoughtDetailScreen."""
         _mock_routes()
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         async with app.run_test(size=(120, 40)) as pilot:
@@ -572,44 +572,23 @@ class TestVisibilityReviewApp:
             app.action_review_selected()
             await pilot.pause()
             assert len(app.screen_stack) > 1
+            assert isinstance(app.screen_stack[-1], ThoughtDetailScreen)
 
     @respx.mock
-    async def test_action_review_selected_without_scan_triggers_worker(
-        self, tmp_path: Path
-    ) -> None:
-        """When thought not scanned, triggers _scan_and_review worker."""
+    async def test_action_review_selected_without_scan_shows_detail(self) -> None:
+        """When thought not scanned, pushes ThoughtDetailScreen (no scan yet)."""
         _mock_routes()
-        respx.post("https://openrouter.ai/api/v1/chat/completions").respond(
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "visibility": ["sfw"],
-                                    "type": "observation",
-                                    "topics": [],
-                                }
-                            )
-                        }
-                    }
-                ]
-            }
-        )
         app = VisibilityReviewApp(config=FAKE_CONFIG)
-        app.cache_path = tmp_path / "cache.json"
         async with app.run_test(size=(120, 40)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            # No scan results — triggers _scan_and_review
+            # No scan results — should still show detail screen
             app.action_review_selected()
-            await app.workers.wait_for_complete()
             await pilot.pause()
 
-            assert "id-1" in app.scan_results
-            # Should have pushed ReviewScreen
             assert len(app.screen_stack) > 1
+            assert isinstance(app.screen_stack[-1], ThoughtDetailScreen)
 
     @respx.mock
     async def test_scan_and_review_error_shows_status(self, tmp_path: Path) -> None:
@@ -624,13 +603,13 @@ class TestVisibilityReviewApp:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            app.action_review_selected()
+            # Simulate what happens when detail screen returns "review"
+            # on an unscanned thought: _on_detail_done triggers _scan_and_review
+            app._on_detail_done("review")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
             assert "Error" in _status_text(app)
-            # No ReviewScreen pushed
-            assert len(app.screen_stack) == 1
 
     @respx.mock
     async def test_scan_and_review_saves_cache(self, tmp_path: Path) -> None:
@@ -659,7 +638,8 @@ class TestVisibilityReviewApp:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            app.action_review_selected()
+            # Simulate detail->review flow on unscanned thought
+            app._on_detail_done("review")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -914,3 +894,172 @@ class TestReviewScreen:
                 # Tag rules should have removed "sfw"
                 assert "sfw" not in edit.text
                 assert "lgbtq_identity" in edit.text
+
+
+# ---------------------------------------------------------------------------
+# ThoughtDetailScreen tests
+# ---------------------------------------------------------------------------
+
+
+class TestThoughtDetailScreen:
+    async def test_detail_renders_full_content(self) -> None:
+        """Detail screen shows the full thought content without truncation."""
+        long_content = "A" * 200
+        thought = _thought(content=long_content)
+        screen = ThoughtDetailScreen(thought, None, [], FAKE_CONFIG)
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(screen)
+                await pilot.pause()
+                static = screen.query_one("#detail-content", Static)
+                assert str(static.content) == long_content
+
+    async def test_detail_close_dismisses_none(self) -> None:
+        """Clicking Close dismisses with None."""
+        thought = _thought()
+        results: list[str | None] = []
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+
+                def capture(result: str | None) -> None:
+                    results.append(result)
+
+                screen = ThoughtDetailScreen(thought, None, [], FAKE_CONFIG)
+                app.push_screen(screen, callback=capture)
+                await pilot.pause()
+                await pilot.click("#btn-close")
+                await pilot.pause()
+                assert results == [None]
+
+    async def test_detail_review_dismisses_review(self) -> None:
+        """Clicking Review dismisses with 'review'."""
+        thought = _thought()
+        results: list[str | None] = []
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+
+                def capture(result: str | None) -> None:
+                    results.append(result)
+
+                screen = ThoughtDetailScreen(thought, None, [], FAKE_CONFIG)
+                app.push_screen(screen, callback=capture)
+                await pilot.pause()
+                await pilot.click("#btn-review")
+                await pilot.pause()
+                assert results == ["review"]
+
+    async def test_detail_shows_metadata(self) -> None:
+        """Detail screen shows created date, type, and visibility."""
+        thought = _thought(
+            content="test",
+            visibility=["sfw", "work"],
+            type="question",
+            topics=["coding"],
+            created_at="2026-03-16T12:00:00Z",
+        )
+        screen = ThoughtDetailScreen(thought, None, [], FAKE_CONFIG)
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(screen)
+                await pilot.pause()
+                header = str(screen.query_one("#detail-header", Label).content)
+                assert "2026-03-16" in header
+                assert "question" in header
+                meta = str(screen.query_one("#detail-meta", Static).content)
+                assert "coding" in meta
+                assert "sfw" in meta
+
+    async def test_detail_unscanned_shows_no_new_vis(self) -> None:
+        """When new_meta is None, detail screen omits new visibility line."""
+        thought = _thought()
+        screen = ThoughtDetailScreen(thought, None, [], FAKE_CONFIG)
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(screen)
+                await pilot.pause()
+                meta = str(screen.query_one("#detail-meta", Static).content)
+                assert "New visibility" not in meta
+
+    async def test_detail_scanned_shows_new_vis_and_diff(self) -> None:
+        """When new_meta is provided, detail screen shows new vis and diff status."""
+        thought = _thought(visibility=["sfw"])
+        new_meta = ThoughtMetadata(visibility=["personal"])
+        screen = ThoughtDetailScreen(thought, new_meta, [], FAKE_CONFIG)
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.push_screen(screen)
+                await pilot.pause()
+                meta = str(screen.query_one("#detail-meta", Static).content)
+                assert "New visibility" in meta
+                assert "personal" in meta
+                assert "DIFF" in meta
+
+
+# ---------------------------------------------------------------------------
+# Table newline collapsing tests
+# ---------------------------------------------------------------------------
+
+
+class TestTableNewlineCollapsing:
+    @respx.mock
+    async def test_table_collapses_newlines(self) -> None:
+        """Content with newlines should be collapsed to spaces in table."""
+        thoughts_json = [
+            {
+                "id": "id-nl",
+                "content": "line one\nline two\nline three",
+                "metadata": {
+                    "visibility": ["sfw"],
+                    "type": "observation",
+                    "topics": [],
+                },
+                "visibility_verified_by_human_at": None,
+                "created_at": "2026-03-16T12:00:00Z",
+                "submitted_by": "user",
+            },
+        ]
+        respx.get("https://test.supabase.co/rest/v1/thoughts").respond(
+            json=thoughts_json
+        )
+        respx.post("https://test.supabase.co/rest/v1/rpc/get_current_prompt").respond(
+            json=[FAKE_PROMPT_JSON]
+        )
+        respx.get("https://test.supabase.co/rest/v1/tag_rules").respond(json=[])
+
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#main-table", DataTable)
+            row = table.get_row_at(0)
+            content_cell = row[1]
+            assert "\n" not in str(content_cell)
+            assert "line one line two line three" in str(content_cell)
+
+    @respx.mock
+    async def test_resize_repopulates_table(self) -> None:
+        """Resizing the terminal re-truncates content column."""
+        _mock_routes()
+        # Use a thought long enough to be truncated at narrow width
+        long_content = "word " * 40  # 200 chars
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.thoughts[0] = _thought(id="id-1", content=long_content)
+            app._populate_table()
+            table = app.query_one("#main-table", DataTable)
+            wide_content = str(table.get_row_at(0)[1])
+
+            await pilot.resize_terminal(60, 40)
+            await pilot.pause()
+            narrow_content = str(table.get_row_at(0)[1])
+
+            assert len(narrow_content) < len(wide_content)
