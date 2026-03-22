@@ -4,25 +4,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import respx
 from main import ReviewScreen, VisibilityReviewApp
+from models import Config, Thought, ThoughtMetadata
 from textual.widgets import DataTable, Label, TextArea
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-FAKE_CONFIG: dict[str, str] = {
-    "supabase_url": "https://test.supabase.co",
-    "supabase_key": "test-key",
-    "openrouter_api_key": "test-or-key",
-    "openrouter_base": "https://openrouter.ai/api/v1",
-}
+FAKE_CONFIG = Config(
+    supabase_url="https://test.supabase.co",
+    supabase_key="test-key",
+    openrouter_api_key="test-or-key",
+)
 
-FAKE_THOUGHTS: list[dict[str, Any]] = [
+FAKE_THOUGHTS_JSON = [
     {
         "id": "id-1",
         "content": "Test thought one",
@@ -45,7 +44,7 @@ FAKE_THOUGHTS: list[dict[str, Any]] = [
     },
 ]
 
-FAKE_PROMPT: dict[str, Any] = {
+FAKE_PROMPT_JSON = {
     "prompt_template_text": "Classify this thought.",
     "model_string": "openai/gpt-5.2",
     "prompt_template_id": "prompt-abc",
@@ -54,9 +53,11 @@ FAKE_PROMPT: dict[str, Any] = {
 
 def _mock_routes() -> None:
     """Set up respx routes for the standard app load sequence."""
-    respx.get("https://test.supabase.co/rest/v1/thoughts").respond(json=FAKE_THOUGHTS)
+    respx.get("https://test.supabase.co/rest/v1/thoughts").respond(
+        json=FAKE_THOUGHTS_JSON
+    )
     respx.post("https://test.supabase.co/rest/v1/rpc/get_current_prompt").respond(
-        json=[FAKE_PROMPT]
+        json=[FAKE_PROMPT_JSON]
     )
     respx.get("https://test.supabase.co/rest/v1/tag_rules").respond(json=[])
 
@@ -64,6 +65,30 @@ def _mock_routes() -> None:
 def _status_text(app: VisibilityReviewApp) -> str:
     """Get the text content of the status bar label."""
     return str(app.query_one("#status-bar", Label).content)
+
+
+def _thought(
+    *,
+    id: str = "t-1",
+    content: str = "test",
+    visibility: list[str] | None = None,
+    type: str = "observation",
+    topics: list[str] | None = None,
+    verified_at: str | None = None,
+    created_at: str = "2026-03-16T12:00:00Z",
+) -> Thought:
+    """Build a Thought for tests."""
+    return Thought(
+        id=id,
+        content=content,
+        metadata=ThoughtMetadata(
+            visibility=visibility or ["sfw"],
+            type=type,
+            topics=topics or [],
+        ),
+        visibility_verified_by_human_at=verified_at,
+        created_at=created_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +120,9 @@ class TestVisibilityReviewApp:
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app.scan_results = {"id-1": {"visibility": ["sfw"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["sfw"]),
+            }
             app.action_clear_cache()
             assert app.scan_results == {}
             assert "Cache cleared" in _status_text(app)
@@ -116,7 +143,9 @@ class TestVisibilityReviewApp:
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app.scan_results = {"id-1": {"visibility": ["personal"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["personal"]),
+            }
             app._populate_table()
             table = app.query_one("#main-table", DataTable)
             row_data = table.get_row_at(0)
@@ -128,7 +157,9 @@ class TestVisibilityReviewApp:
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app.scan_results = {"id-1": {"visibility": ["sfw"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["sfw"]),
+            }
             app._populate_table()
             table = app.query_one("#main-table", DataTable)
             row_data = table.get_row_at(0)
@@ -143,7 +174,7 @@ class TestVisibilityReviewApp:
             thought = app._get_selected_thought()
             # cursor defaults to row 0 => id-1
             assert thought is not None
-            assert thought["id"] == "id-1"
+            assert thought.id == "id-1"
 
     @respx.mock
     async def test_get_selected_thought_index_error_returns_none(self) -> None:
@@ -186,7 +217,9 @@ class TestVisibilityReviewApp:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             # Inject scan result for id-1 (cursor defaults to row 0)
-            app.scan_results = {"id-1": {"visibility": ["work"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["work"]),
+            }
             app._on_review_done("saved")
             assert "saved" in _status_text(app)
             assert "id-1" not in app.scan_results
@@ -205,7 +238,7 @@ class TestVisibilityReviewApp:
         """If fetch fails, status bar shows error."""
         respx.get("https://test.supabase.co/rest/v1/thoughts").respond(status_code=500)
         respx.post("https://test.supabase.co/rest/v1/rpc/get_current_prompt").respond(
-            json=[FAKE_PROMPT]
+            json=[FAKE_PROMPT_JSON]
         )
         respx.get("https://test.supabase.co/rest/v1/tag_rules").respond(json=[])
         app = VisibilityReviewApp(config=FAKE_CONFIG)
@@ -220,7 +253,9 @@ class TestVisibilityReviewApp:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             # Inject diff for id-1
-            app.scan_results = {"id-1": {"visibility": ["personal"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["personal"]),
+            }
             app._review_next_diff()
             await pilot.pause()
             # Should have pushed a ReviewScreen
@@ -242,7 +277,9 @@ class TestVisibilityReviewApp:
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app.scan_results = {"id-1": {"visibility": ["work"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["work"]),
+            }
             # _on_review_all_done with non-None result continues
             app._on_review_all_done("skipped")
             # id-1 not saved/verified, so scan_results untouched
@@ -252,10 +289,10 @@ class TestVisibilityReviewApp:
     async def test_load_data_tag_rules_error_falls_back(self) -> None:
         """When tag_rules fetch returns an HTTP error, tag_rules defaults to []."""
         respx.get("https://test.supabase.co/rest/v1/thoughts").respond(
-            json=FAKE_THOUGHTS
+            json=FAKE_THOUGHTS_JSON
         )
         respx.post("https://test.supabase.co/rest/v1/rpc/get_current_prompt").respond(
-            json=[FAKE_PROMPT]
+            json=[FAKE_PROMPT_JSON]
         )
         respx.get("https://test.supabase.co/rest/v1/tag_rules").respond(status_code=404)
         app = VisibilityReviewApp(config=FAKE_CONFIG)
@@ -274,17 +311,26 @@ class TestVisibilityReviewApp:
         cache_file = tmp_path / "cache.json"
         cache_data = {
             "prompt_template_id": "prompt-abc",
-            "scanned": {"id-1": {"visibility": ["work"]}},
+            "scanned": {
+                "id-1": {
+                    "visibility": ["work"],
+                    "type": "observation",
+                    "topics": [],
+                }
+            },
         }
         cache_file.write_text(json.dumps(cache_data))
 
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         app.cache_path = cache_file
-        app.cache = json.loads(cache_file.read_text())
+        from main import load_cache
+
+        app.cache = load_cache(cache_file)
         async with app.run_test(size=(120, 40)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert app.scan_results == {"id-1": {"visibility": ["work"]}}
+            assert "id-1" in app.scan_results
+            assert app.scan_results["id-1"].visibility == ["work"]
             assert "1 cached" in _status_text(app)
 
     @respx.mock
@@ -296,13 +342,21 @@ class TestVisibilityReviewApp:
         cache_file = tmp_path / "cache.json"
         cache_data = {
             "prompt_template_id": "old-prompt-id",
-            "scanned": {"id-1": {"visibility": ["work"]}},
+            "scanned": {
+                "id-1": {
+                    "visibility": ["work"],
+                    "type": "observation",
+                    "topics": [],
+                }
+            },
         }
         cache_file.write_text(json.dumps(cache_data))
 
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         app.cache_path = cache_file
-        app.cache = json.loads(cache_file.read_text())
+        from main import load_cache
+
+        app.cache = load_cache(cache_file)
         async with app.run_test(size=(120, 40)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
@@ -342,7 +396,7 @@ class TestVisibilityReviewApp:
 
             assert "id-1" in app.scan_results
             assert "id-2" in app.scan_results
-            assert app.scan_results["id-1"]["visibility"] == ["sfw"]
+            assert app.scan_results["id-1"].visibility == ["sfw"]
             assert "Scan done" in _status_text(app)
             # Cache file written
             assert app.cache_path.exists()
@@ -378,8 +432,8 @@ class TestVisibilityReviewApp:
 
             # Pre-populate both as scanned
             app.scan_results = {
-                "id-1": {"visibility": ["sfw"]},
-                "id-2": {"visibility": ["personal"]},
+                "id-1": ThoughtMetadata(visibility=["sfw"]),
+                "id-2": ThoughtMetadata(visibility=["personal"]),
             }
             app.action_scan()
             await app.workers.wait_for_complete()
@@ -430,7 +484,7 @@ class TestVisibilityReviewApp:
         ]
         respx.get("https://test.supabase.co/rest/v1/thoughts").respond(json=thoughts)
         respx.post("https://test.supabase.co/rest/v1/rpc/get_current_prompt").respond(
-            json=[FAKE_PROMPT]
+            json=[FAKE_PROMPT_JSON]
         )
         respx.get("https://test.supabase.co/rest/v1/tag_rules").respond(json=[])
         respx.post("https://openrouter.ai/api/v1/chat/completions").respond(
@@ -512,7 +566,9 @@ class TestVisibilityReviewApp:
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            app.scan_results = {"id-1": {"visibility": ["work"]}}
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["work"]),
+            }
             app.action_review_selected()
             await pilot.pause()
             assert len(app.screen_stack) > 1
@@ -641,14 +697,8 @@ class TestVisibilityReviewApp:
 
 class TestReviewScreen:
     async def test_compose_renders(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "Hello world",
-            "metadata": {"visibility": ["sfw"], "type": "observation"},
-            "visibility_verified_by_human_at": None,
-            "created_at": "2026-03-16T12:00:00Z",
-        }
-        new_meta: dict[str, Any] = {"visibility": ["sfw", "work"]}
+        thought = _thought(content="Hello world")
+        new_meta = ThoughtMetadata(visibility=["sfw", "work"])
         screen = ReviewScreen(thought, new_meta, [], FAKE_CONFIG)
 
         app = VisibilityReviewApp(config=FAKE_CONFIG)
@@ -661,14 +711,10 @@ class TestReviewScreen:
                 assert "work" in edit.text
 
     async def test_parse_visibility(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
-        screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
+        thought = _thought()
+        screen = ReviewScreen(
+            thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+        )
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         with patch.object(app, "_load_data"):
             async with app.run_test(size=(120, 40)) as pilot:
@@ -681,14 +727,10 @@ class TestReviewScreen:
                 assert result == ["personal", "sfw", "work"]
 
     async def test_parse_visibility_deduplicates(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
-        screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
+        thought = _thought()
+        screen = ReviewScreen(
+            thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+        )
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         with patch.object(app, "_load_data"):
             async with app.run_test(size=(120, 40)) as pilot:
@@ -701,14 +743,10 @@ class TestReviewScreen:
                 assert result == ["sfw", "work"]
 
     async def test_parse_visibility_handles_newlines(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
-        screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
+        thought = _thought()
+        screen = ReviewScreen(
+            thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+        )
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         with patch.object(app, "_load_data"):
             async with app.run_test(size=(120, 40)) as pilot:
@@ -721,37 +759,27 @@ class TestReviewScreen:
                 assert result == ["personal", "work"]
 
     async def test_build_updated_metadata(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {
-                "visibility": ["sfw"],
-                "type": "observation",
-                "topics": ["test"],
-            },
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
-        screen = ReviewScreen(thought, {"visibility": ["personal"]}, [], FAKE_CONFIG)
+        thought = _thought(
+            visibility=["sfw"],
+            type="observation",
+            topics=["test"],
+        )
+        screen = ReviewScreen(
+            thought, ThoughtMetadata(visibility=["personal"]), [], FAKE_CONFIG
+        )
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         with patch.object(app, "_load_data"):
             async with app.run_test(size=(120, 40)) as pilot:
                 app.push_screen(screen)
                 await pilot.pause()
                 meta = screen._build_updated_metadata()
-                assert meta["type"] == "observation"
-                assert meta["topics"] == ["test"]
-                assert isinstance(meta["visibility"], list)
+                assert meta.type == "observation"
+                assert meta.topics == ["test"]
+                assert isinstance(meta.visibility, list)
 
     @respx.mock
     async def test_skip_dismisses(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
+        thought = _thought()
         _mock_routes()
         results: list[str | None] = []
 
@@ -762,7 +790,9 @@ class TestReviewScreen:
             def capture(result: str | None) -> None:
                 results.append(result)
 
-            screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
+            screen = ReviewScreen(
+                thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+            )
             app.push_screen(screen, callback=capture)
             await pilot.pause()
             await pilot.click("#btn-skip")
@@ -771,13 +801,7 @@ class TestReviewScreen:
 
     @respx.mock
     async def test_cancel_dismisses_none(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
+        thought = _thought()
         _mock_routes()
         results: list[str | None] = []
 
@@ -788,7 +812,9 @@ class TestReviewScreen:
             def capture(result: str | None) -> None:
                 results.append(result)
 
-            screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
+            screen = ReviewScreen(
+                thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+            )
             app.push_screen(screen, callback=capture)
             await pilot.pause()
             await pilot.click("#btn-cancel")
@@ -797,43 +823,7 @@ class TestReviewScreen:
 
     @respx.mock
     async def test_save_calls_api(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-save",
-            "content": "save test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
-        _mock_routes()
-        patch_route = respx.patch("https://test.supabase.co/rest/v1/thoughts").respond(
-            status_code=204
-        )
-        results: list[str | None] = []
-
-        app = VisibilityReviewApp(config=FAKE_CONFIG)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-
-            def capture(result: str | None) -> None:
-                results.append(result)
-
-            screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
-            app.push_screen(screen, callback=capture)
-            await pilot.pause()
-            await pilot.click("#btn-save")
-            await pilot.pause()
-            assert results == ["saved"]
-            assert patch_route.called
-
-    @respx.mock
-    async def test_verify_calls_api_with_timestamp(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-verify",
-            "content": "verify test",
-            "metadata": {"visibility": ["personal"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
+        thought = _thought(id="t-save", content="save test")
         _mock_routes()
         patch_route = respx.patch("https://test.supabase.co/rest/v1/thoughts").respond(
             status_code=204
@@ -848,7 +838,38 @@ class TestReviewScreen:
                 results.append(result)
 
             screen = ReviewScreen(
-                thought, {"visibility": ["personal"]}, [], FAKE_CONFIG
+                thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+            )
+            app.push_screen(screen, callback=capture)
+            await pilot.pause()
+            await pilot.click("#btn-save")
+            await pilot.pause()
+            assert results == ["saved"]
+            assert patch_route.called
+
+    @respx.mock
+    async def test_verify_calls_api_with_timestamp(self) -> None:
+        thought = _thought(
+            id="t-verify", content="verify test", visibility=["personal"]
+        )
+        _mock_routes()
+        patch_route = respx.patch("https://test.supabase.co/rest/v1/thoughts").respond(
+            status_code=204
+        )
+        results: list[str | None] = []
+
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            def capture(result: str | None) -> None:
+                results.append(result)
+
+            screen = ReviewScreen(
+                thought,
+                ThoughtMetadata(visibility=["personal"]),
+                [],
+                FAKE_CONFIG,
             )
             app.push_screen(screen, callback=capture)
             await pilot.pause()
@@ -860,14 +881,13 @@ class TestReviewScreen:
             assert "visibility_verified_by_human_at" in body
 
     async def test_verified_thought_shows_timestamp(self) -> None:
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "already verified",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": "2026-03-15T10:00:00Z",
-        }
-        screen = ReviewScreen(thought, {"visibility": ["sfw"]}, [], FAKE_CONFIG)
+        thought = _thought(
+            content="already verified",
+            verified_at="2026-03-15T10:00:00Z",
+        )
+        screen = ReviewScreen(
+            thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+        )
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         with patch.object(app, "_load_data"):
             async with app.run_test(size=(120, 40)) as pilot:
@@ -879,15 +899,11 @@ class TestReviewScreen:
 
     async def test_compose_with_tag_rules_applied(self) -> None:
         """New visibility in edit area should have tag rules applied."""
-        thought: dict[str, Any] = {
-            "id": "t-1",
-            "content": "test",
-            "metadata": {"visibility": ["sfw"]},
-            "created_at": "2026-03-16T12:00:00Z",
-            "visibility_verified_by_human_at": None,
-        }
-        rules = [{"if_present": "lgbtq_identity", "remove_tag": "sfw"}]
-        new_meta: dict[str, Any] = {"visibility": ["sfw", "lgbtq_identity"]}
+        from models import TagRule
+
+        thought = _thought()
+        rules = [TagRule(if_present="lgbtq_identity", remove_tag="sfw")]
+        new_meta = ThoughtMetadata(visibility=["sfw", "lgbtq_identity"])
         screen = ReviewScreen(thought, new_meta, rules, FAKE_CONFIG)
         app = VisibilityReviewApp(config=FAKE_CONFIG)
         with patch.object(app, "_load_data"):

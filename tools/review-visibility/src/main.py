@@ -9,11 +9,20 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import httpx
+from models import (
+    Config,
+    JsonValue,
+    PromptInfo,
+    ScanCache,
+    TagRule,
+    Thought,
+    ThoughtMetadata,
+)
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -49,14 +58,13 @@ ALL_VISIBILITY_LABELS = [
 ]
 
 
-def get_config() -> dict[str, str]:
+def get_config() -> Config:
     """Return current config from environment."""
-    return {
-        "supabase_url": os.environ.get("SUPABASE_URL", ""),
-        "supabase_key": os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
-        "openrouter_api_key": os.environ.get("OPENROUTER_API_KEY", ""),
-        "openrouter_base": "https://openrouter.ai/api/v1",
-    }
+    return Config(
+        supabase_url=os.environ.get("SUPABASE_URL", ""),
+        supabase_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+        openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+    )
 
 
 def get_cache_path() -> Path:
@@ -65,44 +73,138 @@ def get_cache_path() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Parsing helpers — confine unsafe JSON→domain conversion
+# ---------------------------------------------------------------------------
+
+
+def _parse_metadata(raw: JsonValue) -> ThoughtMetadata:
+    """Parse a JSON value into ThoughtMetadata."""
+    if not isinstance(raw, dict):
+        return ThoughtMetadata()
+    return ThoughtMetadata(
+        visibility=_str_list(raw.get("visibility")),
+        type=str(raw.get("type", "observation")),
+        topics=_str_list(raw.get("topics")),
+    )
+
+
+def _str_list(val: JsonValue) -> list[str]:
+    """Extract a list of strings from a JSON value."""
+    if not isinstance(val, list):
+        return []
+    return [str(item) for item in val if isinstance(item, str)]
+
+
+def _parse_thought(raw: JsonValue) -> Thought:
+    """Parse a JSON value into a Thought."""
+    if not isinstance(raw, dict):
+        msg = f"Expected dict for thought, got {type(raw).__name__}"
+        raise ValueError(msg)
+    return Thought(
+        id=str(raw.get("id", "")),
+        content=str(raw.get("content", "")),
+        metadata=_parse_metadata(raw.get("metadata")),
+        visibility_verified_by_human_at=_opt_str(
+            raw.get("visibility_verified_by_human_at")
+        ),
+        created_at=str(raw.get("created_at", "")),
+        submitted_by=str(raw.get("submitted_by", "")),
+    )
+
+
+def _opt_str(val: JsonValue) -> str | None:
+    """Convert a JSON value to an optional string."""
+    if val is None:
+        return None
+    return str(val)
+
+
+def _parse_prompt_info(raw: JsonValue) -> PromptInfo:
+    """Parse a JSON value into PromptInfo."""
+    if not isinstance(raw, dict):
+        return PromptInfo()
+    return PromptInfo(
+        prompt_template_text=str(raw.get("prompt_template_text", "")),
+        model_string=str(raw.get("model_string", "")),
+        prompt_template_id=str(raw.get("prompt_template_id", "")),
+    )
+
+
+def _parse_tag_rule(raw: JsonValue) -> TagRule:
+    """Parse a JSON value into a TagRule."""
+    if not isinstance(raw, dict):
+        msg = f"Expected dict for tag rule, got {type(raw).__name__}"
+        raise ValueError(msg)
+    return TagRule(
+        if_present=str(raw.get("if_present", "")),
+        remove_tag=str(raw.get("remove_tag", "")),
+    )
+
+
+def _parse_scan_cache(raw: JsonValue) -> ScanCache:
+    """Parse a JSON value into a ScanCache."""
+    if not isinstance(raw, dict):
+        return ScanCache()
+    scanned_raw = raw.get("scanned")
+    scanned: dict[str, ThoughtMetadata] = {}
+    if isinstance(scanned_raw, dict):
+        for k, v in scanned_raw.items():
+            scanned[k] = _parse_metadata(v)
+    pid = raw.get("prompt_template_id")
+    return ScanCache(
+        scanned=scanned,
+        prompt_template_id=str(pid) if pid is not None else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers
+# ---------------------------------------------------------------------------
+
+
+def _metadata_to_dict(meta: ThoughtMetadata) -> dict[str, JsonValue]:
+    """Convert ThoughtMetadata to a JSON-compatible dict."""
+    return asdict(meta)
+
+
+# ---------------------------------------------------------------------------
 # Supabase / OpenRouter helpers
 # ---------------------------------------------------------------------------
 
 
-def sb_headers(config: dict[str, str]) -> dict[str, str]:
+def sb_headers(config: Config) -> dict[str, str]:
     """Build Supabase REST headers."""
-    key = config["supabase_key"]
     return {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
+        "apikey": config.supabase_key,
+        "Authorization": f"Bearer {config.supabase_key}",
         "Content-Type": "application/json",
     }
 
 
-def sb_url(config: dict[str, str], path: str) -> str:
+def sb_url(config: Config, path: str) -> str:
     """Build Supabase REST URL."""
-    return f"{config['supabase_url']}/rest/v1/{path}"
+    return f"{config.supabase_url}/rest/v1/{path}"
 
 
 def sb_rpc(
-    config: dict[str, str],
+    config: Config,
     fn: str,
-    params: dict[str, Any] | None = None,
-) -> Any:
+    params: dict[str, str] | None = None,
+) -> JsonValue:
     """Call a Supabase RPC function."""
     r = httpx.post(
-        f"{config['supabase_url']}/rest/v1/rpc/{fn}",
+        f"{config.supabase_url}/rest/v1/rpc/{fn}",
         headers=sb_headers(config),
         json=params or {},
         timeout=30,
     )
     r.raise_for_status()
-    return r.json()
+    return r.json()  # type: ignore[no-any-return]
 
 
-def fetch_all_thoughts(config: dict[str, str]) -> list[dict[str, Any]]:
+def fetch_all_thoughts(config: Config) -> list[Thought]:
     """Fetch all thoughts with their metadata."""
-    thoughts: list[dict[str, Any]] = []
+    thoughts: list[Thought] = []
     offset = 0
     limit = 1000
     while True:
@@ -123,25 +225,25 @@ def fetch_all_thoughts(config: dict[str, str]) -> list[dict[str, Any]]:
             timeout=30,
         )
         r.raise_for_status()
-        batch: list[dict[str, Any]] = r.json()
+        batch: list[JsonValue] = r.json()
         if not batch:
             break
-        thoughts.extend(batch)
+        thoughts.extend(_parse_thought(item) for item in batch)
         if len(batch) < limit:
             break
         offset += limit
     return thoughts
 
 
-def get_current_prompt(config: dict[str, str]) -> dict[str, Any]:
+def get_current_prompt(config: Config) -> PromptInfo:
     """Fetch current categorization prompt from DB."""
     result = sb_rpc(config, "get_current_prompt", {"p_type": "categorization"})
     if isinstance(result, list) and result:
-        return result[0]  # type: ignore[no-any-return]
-    return result  # type: ignore[no-any-return]
+        return _parse_prompt_info(result[0])
+    return _parse_prompt_info(result)
 
 
-def fetch_tag_rules(config: dict[str, str]) -> list[dict[str, str]]:
+def fetch_tag_rules(config: Config) -> list[TagRule]:
     """Fetch active tag rules."""
     r = httpx.get(
         sb_url(config, "tag_rules"),
@@ -150,18 +252,19 @@ def fetch_tag_rules(config: dict[str, str]) -> list[dict[str, str]]:
         timeout=30,
     )
     r.raise_for_status()
-    return r.json()  # type: ignore[no-any-return]
+    raw: list[JsonValue] = r.json()
+    return [_parse_tag_rule(item) for item in raw]
 
 
 def apply_tag_rules(
     visibility: list[str],
-    rules: list[dict[str, str]],
+    rules: list[TagRule],
 ) -> list[str]:
     """Apply deterministic tag removal rules to a visibility list."""
     result = list(visibility)
     for rule in rules:
-        if rule["if_present"] in result:
-            result = [t for t in result if t != rule["remove_tag"]]
+        if rule.if_present in result:
+            result = [t for t in result if t != rule.remove_tag]
     return result
 
 
@@ -169,13 +272,13 @@ def reclassify_thought(
     content: str,
     prompt_text: str,
     model: str,
-    config: dict[str, str],
-) -> dict[str, Any]:
+    config: Config,
+) -> ThoughtMetadata:
     """Re-run the categorization prompt on a thought."""
     r = httpx.post(
-        f"{config['openrouter_base']}/chat/completions",
+        f"{config.openrouter_base}/chat/completions",
         headers={
-            "Authorization": f"Bearer {config['openrouter_api_key']}",
+            "Authorization": f"Bearer {config.openrouter_api_key}",
             "Content-Type": "application/json",
         },
         json={
@@ -189,21 +292,35 @@ def reclassify_thought(
         timeout=60,
     )
     r.raise_for_status()
-    d: dict[str, Any] = r.json()
+    d: JsonValue = r.json()
     try:
-        return json.loads(d["choices"][0]["message"]["content"])  # type: ignore[no-any-return]
+        if not isinstance(d, dict):
+            raise KeyError  # noqa: TRY301
+        choices = d["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise KeyError  # noqa: TRY301
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise KeyError  # noqa: TRY301
+        msg = first["message"]
+        if not isinstance(msg, dict):
+            raise KeyError  # noqa: TRY301
+        text = msg["content"]
+        if not isinstance(text, str):
+            raise KeyError  # noqa: TRY301
+        return _parse_metadata(json.loads(text))
     except (KeyError, json.JSONDecodeError):
-        return {
-            "visibility": ["uncategorized"],
-            "type": "observation",
-            "topics": ["uncategorized"],
-        }
+        return ThoughtMetadata(
+            visibility=["uncategorized"],
+            type="observation",
+            topics=["uncategorized"],
+        )
 
 
 def update_thought_metadata(
     thought_id: str,
-    metadata: dict[str, Any],
-    config: dict[str, str],
+    metadata: ThoughtMetadata,
+    config: Config,
 ) -> None:
     """Update the metadata column for a thought."""
     r = httpx.patch(
@@ -211,7 +328,7 @@ def update_thought_metadata(
         headers={**sb_headers(config), "Prefer": "return=minimal"},
         params={"id": f"eq.{thought_id}"},
         json={
-            "metadata": metadata,
+            "metadata": _metadata_to_dict(metadata),
             "updated_at": datetime.now(UTC).isoformat(),
         },
         timeout=30,
@@ -221,8 +338,8 @@ def update_thought_metadata(
 
 def verify_thought(
     thought_id: str,
-    metadata: dict[str, Any],
-    config: dict[str, str],
+    metadata: ThoughtMetadata,
+    config: Config,
 ) -> None:
     """Update metadata and set visibility_verified_by_human_at."""
     now = datetime.now(UTC).isoformat()
@@ -231,7 +348,7 @@ def verify_thought(
         headers={**sb_headers(config), "Prefer": "return=minimal"},
         params={"id": f"eq.{thought_id}"},
         json={
-            "metadata": metadata,
+            "metadata": _metadata_to_dict(metadata),
             "updated_at": now,
             "visibility_verified_by_human_at": now,
         },
@@ -245,16 +362,20 @@ def verify_thought(
 # ---------------------------------------------------------------------------
 
 
-def load_cache(cache_path: Path) -> dict[str, Any]:
+def load_cache(cache_path: Path) -> ScanCache:
     """Load scan cache from disk."""
     if cache_path.exists():
-        return json.loads(cache_path.read_text())  # type: ignore[no-any-return]
-    return {"scanned": {}, "prompt_template_id": None}
+        return _parse_scan_cache(json.loads(cache_path.read_text()))
+    return ScanCache()
 
 
-def save_cache(cache: dict[str, Any], cache_path: Path) -> None:
+def save_cache(cache: ScanCache, cache_path: Path) -> None:
     """Persist scan cache to disk."""
-    cache_path.write_text(json.dumps(cache, indent=2, default=str))
+    data = {
+        "scanned": {k: asdict(v) for k, v in cache.scanned.items()},
+        "prompt_template_id": cache.prompt_template_id,
+    }
+    cache_path.write_text(json.dumps(data, indent=2, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -315,10 +436,10 @@ class ReviewScreen(ModalScreen[str | None]):
 
     def __init__(
         self,
-        thought: dict[str, Any],
-        new_meta: dict[str, Any],
-        tag_rules: list[dict[str, str]],
-        config: dict[str, str],
+        thought: Thought,
+        new_meta: ThoughtMetadata,
+        tag_rules: list[TagRule],
+        config: Config,
     ) -> None:
         super().__init__()
         self.thought = thought
@@ -327,20 +448,20 @@ class ReviewScreen(ModalScreen[str | None]):
         self.config = config
 
     def compose(self) -> ComposeResult:
-        old_vis = sorted(self.thought.get("metadata", {}).get("visibility", []))
-        new_vis_raw = sorted(self.new_meta.get("visibility", []))
+        old_vis = sorted(self.thought.metadata.visibility)
+        new_vis_raw = sorted(self.new_meta.visibility)
         new_vis = sorted(apply_tag_rules(new_vis_raw, self.tag_rules))
 
-        created = str(self.thought.get("created_at", ""))[:19]
-        verified = self.thought.get("visibility_verified_by_human_at")
-        verified_str = str(verified)[:19] if verified else "never"
+        created = self.thought.created_at[:19]
+        verified = self.thought.visibility_verified_by_human_at
+        verified_str = verified[:19] if verified else "never"
 
         with Vertical(id="review-dialog"):
             yield Label(
                 f"[b]Thought[/b] ({created})  verified: {verified_str}",
                 markup=True,
             )
-            yield Static(str(self.thought.get("content", "")), id="thought-content")
+            yield Static(self.thought.content, id="thought-content")
 
             with Horizontal(id="vis-columns"):
                 with Vertical(classes="vis-col"):
@@ -390,22 +511,25 @@ class ReviewScreen(ModalScreen[str | None]):
                 tags.append(t)
         return sorted(set(tags))
 
-    def _build_updated_metadata(self) -> dict[str, Any]:
+    def _build_updated_metadata(self) -> ThoughtMetadata:
         vis = self._parse_visibility()
-        meta: dict[str, Any] = dict(self.thought.get("metadata", {}))
-        meta["visibility"] = vis
+        meta = ThoughtMetadata(
+            visibility=vis,
+            type=self.thought.metadata.type,
+            topics=list(self.thought.metadata.topics),
+        )
         return meta
 
     @on(Button.Pressed, "#btn-save")
     def on_save(self) -> None:
         meta = self._build_updated_metadata()
-        update_thought_metadata(self.thought["id"], meta, self.config)
+        update_thought_metadata(self.thought.id, meta, self.config)
         self.dismiss("saved")
 
     @on(Button.Pressed, "#btn-verify")
     def on_verify(self) -> None:
         meta = self._build_updated_metadata()
-        verify_thought(self.thought["id"], meta, self.config)
+        verify_thought(self.thought.id, meta, self.config)
         self.dismiss("verified")
 
     @on(Button.Pressed, "#btn-skip")
@@ -443,15 +567,15 @@ class VisibilityReviewApp(App[None]):
     }
     """
 
-    def __init__(self, config: dict[str, str] | None = None) -> None:
+    def __init__(self, config: Config | None = None) -> None:
         super().__init__()
         self.config = config or get_config()
         self.cache_path = get_cache_path()
-        self.thoughts: list[dict[str, Any]] = []
-        self.cache: dict[str, Any] = load_cache(self.cache_path)
-        self.prompt_info: dict[str, Any] = {}
-        self.tag_rules: list[dict[str, str]] = []
-        self.scan_results: dict[str, dict[str, Any]] = {}
+        self.thoughts: list[Thought] = []
+        self.cache: ScanCache = load_cache(self.cache_path)
+        self.prompt_info: PromptInfo = PromptInfo()
+        self.tag_rules: list[TagRule] = []
+        self.scan_results: dict[str, ThoughtMetadata] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -476,17 +600,15 @@ class VisibilityReviewApp(App[None]):
                 self.tag_rules = []
 
             # Load cached scan results if prompt matches
-            if self.cache.get("prompt_template_id") == self.prompt_info.get(
-                "prompt_template_id"
-            ):
-                self.scan_results = self.cache.get("scanned", {})
+            if self.cache.prompt_template_id == self.prompt_info.prompt_template_id:
+                self.scan_results = dict(self.cache.scanned)
             else:
                 self.scan_results = {}
 
             self.call_from_thread(self._populate_table)
             n = len(self.thoughts)
             cached = len(self.scan_results)
-            model = self.prompt_info.get("model_string", "?")
+            model = self.prompt_info.model_string or "?"
             self.call_from_thread(
                 status.update,
                 f"{n} thoughts | {cached} cached scans | model: {model}"
@@ -502,43 +624,37 @@ class VisibilityReviewApp(App[None]):
         table.cursor_type = "row"
 
         for t in self.thoughts:
-            tid: str = t["id"]
-            meta: dict[str, Any] = t.get("metadata", {})
-            old_vis = sorted(meta.get("visibility", []))
-            created = str(t.get("created_at", ""))[:10]
-            content_raw = str(t.get("content", ""))
-            content = (
-                (content_raw[:80] + "\u2026") if len(content_raw) > 80 else content_raw
-            )
-            verified = t.get("visibility_verified_by_human_at")
+            old_vis = sorted(t.metadata.visibility)
+            created = t.created_at[:10]
+            content = (t.content[:80] + "\u2026") if len(t.content) > 80 else t.content
 
             new_vis: list[str] = []
-            if tid in self.scan_results:
-                new_vis_raw = sorted(self.scan_results[tid].get("visibility", []))
+            if t.id in self.scan_results:
+                new_vis_raw = sorted(self.scan_results[t.id].visibility)
                 new_vis = sorted(apply_tag_rules(new_vis_raw, self.tag_rules))
                 row_status = "match" if old_vis == new_vis else "DIFF"
-            elif verified:
+            elif t.visibility_verified_by_human_at:
                 row_status = "verified"
             else:
                 row_status = "\u2014"
 
-            new_vis_str = ", ".join(new_vis) if tid in self.scan_results else "\u2014"
+            new_vis_str = ", ".join(new_vis) if t.id in self.scan_results else "\u2014"
             table.add_row(
                 created,
                 content,
                 ", ".join(old_vis),
                 new_vis_str,
                 row_status,
-                key=tid,
+                key=t.id,
             )
 
-    def _get_selected_thought(self) -> dict[str, Any] | None:
+    def _get_selected_thought(self) -> Thought | None:
         table = self.query_one("#main-table", DataTable)
         if table.cursor_row is not None and table.row_count > 0:
             try:
                 key = list(table.rows.keys())[table.cursor_row]
                 tid = str(key.value)
-                return next((t for t in self.thoughts if t["id"] == tid), None)
+                return next((t for t in self.thoughts if t.id == tid), None)
             except (IndexError, StopIteration):
                 return None
         return None
@@ -549,17 +665,16 @@ class VisibilityReviewApp(App[None]):
     @work(thread=True)
     def _run_scan(self) -> None:
         status = self.query_one("#status-bar", Label)
-        prompt_text: str = self.prompt_info.get("prompt_template_text", "")
-        model: str = self.prompt_info.get("model_string", "")
-        prompt_id: str = self.prompt_info.get("prompt_template_id", "")
+        prompt_text = self.prompt_info.prompt_template_text
+        model = self.prompt_info.model_string
+        prompt_id = self.prompt_info.prompt_template_id
 
         total = len(self.thoughts)
         scanned = 0
         errors = 0
 
         for i, t in enumerate(self.thoughts):
-            tid: str = t["id"]
-            if tid in self.scan_results:
+            if t.id in self.scan_results:
                 scanned += 1
                 continue
 
@@ -570,31 +685,30 @@ class VisibilityReviewApp(App[None]):
             )
             try:
                 new_meta = reclassify_thought(
-                    t["content"], prompt_text, model, self.config
+                    t.content, prompt_text, model, self.config
                 )
-                self.scan_results[tid] = new_meta
+                self.scan_results[t.id] = new_meta
                 scanned += 1
 
                 if scanned % 5 == 0:
-                    self.cache["scanned"] = self.scan_results
-                    self.cache["prompt_template_id"] = prompt_id
+                    self.cache.scanned = self.scan_results
+                    self.cache.prompt_template_id = prompt_id
                     save_cache(self.cache, self.cache_path)
                     self.call_from_thread(self._populate_table)
             except Exception:
                 errors += 1
 
-        self.cache["scanned"] = self.scan_results
-        self.cache["prompt_template_id"] = prompt_id
+        self.cache.scanned = self.scan_results
+        self.cache.prompt_template_id = prompt_id
         save_cache(self.cache, self.cache_path)
 
         diffs = 0
         for t in self.thoughts:
-            tid = t["id"]
-            if tid in self.scan_results:
-                old_vis = sorted(t.get("metadata", {}).get("visibility", []))
+            if t.id in self.scan_results:
+                old_vis = sorted(t.metadata.visibility)
                 new_vis = sorted(
                     apply_tag_rules(
-                        self.scan_results[tid].get("visibility", []),
+                        self.scan_results[t.id].visibility,
                         self.tag_rules,
                     )
                 )
@@ -612,8 +726,7 @@ class VisibilityReviewApp(App[None]):
         thought = self._get_selected_thought()
         if not thought:
             return
-        tid: str = thought["id"]
-        new_meta = self.scan_results.get(tid)
+        new_meta = self.scan_results.get(thought.id)
         if not new_meta:
             self._scan_and_review(thought)
             return
@@ -623,21 +736,19 @@ class VisibilityReviewApp(App[None]):
         )
 
     @work(thread=True)
-    def _scan_and_review(self, thought: dict[str, Any]) -> None:
+    def _scan_and_review(self, thought: Thought) -> None:
         status = self.query_one("#status-bar", Label)
         self.call_from_thread(status.update, "Classifying thought\u2026")
         try:
             new_meta = reclassify_thought(
-                thought["content"],
-                self.prompt_info.get("prompt_template_text", ""),
-                self.prompt_info.get("model_string", ""),
+                thought.content,
+                self.prompt_info.prompt_template_text,
+                self.prompt_info.model_string,
                 self.config,
             )
-            self.scan_results[thought["id"]] = new_meta
-            self.cache["scanned"] = self.scan_results
-            self.cache["prompt_template_id"] = self.prompt_info.get(
-                "prompt_template_id", ""
-            )
+            self.scan_results[thought.id] = new_meta
+            self.cache.scanned = self.scan_results
+            self.cache.prompt_template_id = self.prompt_info.prompt_template_id
             save_cache(self.cache, self.cache_path)
             self.call_from_thread(self._populate_table)
             self.call_from_thread(
@@ -651,9 +762,9 @@ class VisibilityReviewApp(App[None]):
     def _on_review_done(self, result: str | None) -> None:
         if result in ("saved", "verified"):
             thought = self._get_selected_thought()
-            if thought and thought["id"] in self.scan_results:
-                del self.scan_results[thought["id"]]
-                self.cache["scanned"] = self.scan_results
+            if thought and thought.id in self.scan_results:
+                del self.scan_results[thought.id]
+                self.cache.scanned = self.scan_results
                 save_cache(self.cache, self.cache_path)
             self._populate_table()
             status = self.query_one("#status-bar", Label)
@@ -665,12 +776,11 @@ class VisibilityReviewApp(App[None]):
 
     def _review_next_diff(self) -> None:
         for t in self.thoughts:
-            tid: str = t["id"]
-            if tid in self.scan_results:
-                old_vis = sorted(t.get("metadata", {}).get("visibility", []))
+            if t.id in self.scan_results:
+                old_vis = sorted(t.metadata.visibility)
                 new_vis = sorted(
                     apply_tag_rules(
-                        self.scan_results[tid].get("visibility", []),
+                        self.scan_results[t.id].visibility,
                         self.tag_rules,
                     )
                 )
@@ -678,7 +788,7 @@ class VisibilityReviewApp(App[None]):
                     self.push_screen(
                         ReviewScreen(
                             t,
-                            self.scan_results[tid],
+                            self.scan_results[t.id],
                             self.tag_rules,
                             self.config,
                         ),
@@ -698,7 +808,7 @@ class VisibilityReviewApp(App[None]):
 
     def action_clear_cache(self) -> None:
         self.scan_results = {}
-        self.cache = {"scanned": {}, "prompt_template_id": None}
+        self.cache = ScanCache()
         save_cache(self.cache, self.cache_path)
         self._populate_table()
         status = self.query_one("#status-bar", Label)
@@ -709,11 +819,11 @@ def main() -> None:
     """Entry point: validate config and launch TUI."""
     config = get_config()
     missing = []
-    if not config["supabase_url"]:
+    if not config.supabase_url:
         missing.append("SUPABASE_URL")
-    if not config["supabase_key"]:
+    if not config.supabase_key:
         missing.append("SUPABASE_SERVICE_ROLE_KEY")
-    if not config["openrouter_api_key"]:
+    if not config.openrouter_api_key:
         missing.append("OPENROUTER_API_KEY")
     if missing:
         print(f"Missing env vars: {', '.join(missing)}")
