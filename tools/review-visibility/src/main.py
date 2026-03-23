@@ -12,6 +12,7 @@ import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import httpx
 from models import (
@@ -199,7 +200,7 @@ def sb_rpc(
         timeout=30,
     )
     r.raise_for_status()
-    return r.json()  # type: ignore[no-any-return]
+    return cast(JsonValue, r.json())
 
 
 def fetch_all_thoughts(config: Config) -> list[Thought]:
