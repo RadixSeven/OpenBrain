@@ -461,6 +461,10 @@ class ReviewScreen(ModalScreen[str | None]):
     #button-row Button {
         margin: 0 2;
     }
+    #valid-labels {
+        width: 100%;
+        height: auto;
+    }
     """
 
     def __init__(
@@ -524,6 +528,7 @@ class ReviewScreen(ModalScreen[str | None]):
             yield Label(
                 f"[dim]Valid: {', '.join(ALL_VISIBILITY_LABELS)}[/dim]",
                 markup=True,
+                id="valid-labels",
             )
             with Horizontal(id="button-row"):
                 yield Button("Save", id="btn-save", variant="primary")
