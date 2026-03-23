@@ -7,7 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import respx
-from main import ReviewScreen, ThoughtDetailScreen, VisibilityReviewApp
+from main import (
+    ClassifyingScreen,
+    ReviewScreen,
+    ThoughtDetailScreen,
+    VisibilityReviewApp,
+)
 from models import Config, Thought, ThoughtMetadata
 from textual.widgets import Button, DataTable, Label, Static, TextArea
 
@@ -610,6 +615,54 @@ class TestVisibilityReviewApp:
             await pilot.pause()
 
             assert "Error" in _status_text(app)
+
+    @respx.mock
+    async def test_scan_and_review_shows_loading_screen(self, tmp_path: Path) -> None:
+        """_scan_and_review pushes ClassifyingScreen while LLM call is in-flight."""
+        _mock_routes()
+        respx.post("https://openrouter.ai/api/v1/chat/completions").respond(
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "visibility": ["sfw"],
+                                    "type": "observation",
+                                    "topics": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+        import main as main_mod
+
+        saw_loading = False
+        original_reclassify = main_mod.reclassify_thought
+
+        def _spy(
+            content: str, template: str, model: str, config: Config
+        ) -> ThoughtMetadata:
+            nonlocal saw_loading
+            for screen in app.screen_stack:
+                if isinstance(screen, ClassifyingScreen):
+                    saw_loading = True
+            return original_reclassify(content, template, model, config)
+
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        app.cache_path = tmp_path / "cache.json"
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            with patch.object(main_mod, "reclassify_thought", side_effect=_spy):
+                app._on_detail_done("review")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+
+            assert saw_loading, "ClassifyingScreen should appear during LLM call"
 
     @respx.mock
     async def test_scan_and_review_saves_cache(self, tmp_path: Path) -> None:

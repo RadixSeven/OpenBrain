@@ -35,6 +35,7 @@ from textual.widgets import (
     Footer,
     Header,
     Label,
+    LoadingIndicator,
     Static,
     TextArea,
 )
@@ -384,6 +385,34 @@ def save_cache(cache: ScanCache, cache_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+class ClassifyingScreen(ModalScreen[None]):
+    """Loading overlay shown while the LLM classifies a thought."""
+
+    CSS = """
+    ClassifyingScreen {
+        align: center middle;
+    }
+    #classifying-dialog {
+        width: 50;
+        height: 11;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+        align: center middle;
+    }
+    #classifying-label {
+        width: 100%;
+        text-align: center;
+        margin-bottom: 1;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="classifying-dialog"):
+            yield Label("Classifying thought\u2026", id="classifying-label")
+            yield LoadingIndicator()
+
+
 class ReviewScreen(ModalScreen[str | None]):
     """Review a single thought's visibility tags."""
 
@@ -404,7 +433,6 @@ class ReviewScreen(ModalScreen[str | None]):
     }
     #thought-content {
         height: auto;
-        max-height: 8;
         margin-bottom: 1;
         background: $boost;
         padding: 1;
@@ -457,7 +485,7 @@ class ReviewScreen(ModalScreen[str | None]):
         verified = self.thought.visibility_verified_by_human_at
         verified_str = verified[:19] if verified else "never"
 
-        with Vertical(id="review-dialog"):
+        with VerticalScroll(id="review-dialog"):
             yield Label(
                 f"[b]Thought[/b] ({created})  verified: {verified_str}",
                 markup=True,
@@ -891,6 +919,8 @@ class VisibilityReviewApp(App[None]):
     def _scan_and_review(self, thought: Thought) -> None:
         status = self.query_one("#status-bar", Label)
         self.call_from_thread(status.update, "Classifying thought\u2026")
+        loading = ClassifyingScreen()
+        self.call_from_thread(self.push_screen, loading)
         try:
             new_meta = reclassify_thought(
                 thought.content,
@@ -903,12 +933,14 @@ class VisibilityReviewApp(App[None]):
             self.cache.prompt_template_id = self.prompt_info.prompt_template_id
             save_cache(self.cache, self.cache_path)
             self.call_from_thread(self._populate_table)
+            self.call_from_thread(loading.dismiss)
             self.call_from_thread(
                 self.push_screen,
                 ReviewScreen(thought, new_meta, self.tag_rules, self.config),
                 self._on_review_done,
             )
         except Exception as exc:
+            self.call_from_thread(loading.dismiss)
             self.call_from_thread(status.update, f"Error: {exc}")
 
     def _on_review_done(self, result: str | None) -> None:
