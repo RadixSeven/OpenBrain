@@ -570,16 +570,13 @@ class ThoughtDetailScreen(ModalScreen[str | None]):
         background: $boost;
         padding: 1;
     }
-    #detail-content-scroll {
-        height: 1fr;
-        margin-bottom: 1;
-    }
     #detail-content {
         height: auto;
         padding: 1;
+        margin-bottom: 1;
     }
     #detail-buttons {
-        height: 3;
+        height: auto;
         align: center middle;
     }
     #detail-buttons Button {
@@ -609,7 +606,7 @@ class ThoughtDetailScreen(ModalScreen[str | None]):
         submitted = self.thought.submitted_by or "unknown"
         topics = ", ".join(self.thought.metadata.topics) or "(none)"
 
-        with Vertical(id="detail-dialog"):
+        with VerticalScroll(id="detail-dialog"):
             yield Label(
                 f"[b]Created:[/b] {created}  [b]Type:[/b] {thought_type}"
                 f"  [b]By:[/b] {submitted}  [b]Verified:[/b] {verified_str}",
@@ -637,8 +634,7 @@ class ThoughtDetailScreen(ModalScreen[str | None]):
                 markup=True,
             )
 
-            with VerticalScroll(id="detail-content-scroll"):
-                yield Static(self.thought.content, id="detail-content")
+            yield Static(self.thought.content, id="detail-content")
 
             with Horizontal(id="detail-buttons"):
                 yield Button("Review", id="btn-review", variant="primary")
@@ -661,7 +657,6 @@ class VisibilityReviewApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
         Binding("s", "scan", "Scan for diffs"),
-        Binding("enter", "review_selected", "Review", priority=True),
         Binding("a", "review_all", "Review all diffs"),
         Binding("r", "refresh", "Refresh list"),
         Binding("c", "clear_cache", "Clear cache"),
@@ -859,7 +854,15 @@ class VisibilityReviewApp(App[None]):
             f" {errors} errors | [enter]review [a]ll [q]uit",
         )
 
+    @on(DataTable.RowSelected)
+    def on_row_selected(self) -> None:
+        """Handle enter on a table row."""
+        self._open_detail_for_selected()
+
     def action_review_selected(self) -> None:
+        self._open_detail_for_selected()
+
+    def _open_detail_for_selected(self) -> None:
         thought = self._get_selected_thought()
         if not thought:
             return

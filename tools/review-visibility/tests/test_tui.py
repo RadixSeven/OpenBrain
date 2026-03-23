@@ -9,7 +9,7 @@ from unittest.mock import patch
 import respx
 from main import ReviewScreen, ThoughtDetailScreen, VisibilityReviewApp
 from models import Config, Thought, ThoughtMetadata
-from textual.widgets import DataTable, Label, Static, TextArea
+from textual.widgets import Button, DataTable, Label, Static, TextArea
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1327,3 +1327,226 @@ class TestKeybindings:
                 await pilot.press("escape")
                 await pilot.pause()
                 assert results == [None]
+
+
+# ---------------------------------------------------------------------------
+# Button press integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestButtonPresses:
+    """Integration tests: navigate via keypresses/clicks, verify renders."""
+
+    # -- ThoughtDetailScreen button tests --
+
+    @respx.mock
+    async def test_review_button_opens_review_screen(self) -> None:
+        """enter → ThoughtDetailScreen → tab+enter Review → ReviewScreen."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            # Main table visible before navigation
+            assert app.query_one("#main-table", DataTable).row_count == 2
+
+            # Press enter to open ThoughtDetailScreen
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # Verify ThoughtDetailScreen rendered
+            assert app.screen.query_one("#detail-dialog")
+            assert "Test thought one" in str(
+                app.screen.query_one("#detail-content", Static).content
+            )
+            assert app.screen.query_one("#btn-review", Button)
+            assert app.screen.query_one("#btn-close", Button)
+
+            # Inject scan_results so ReviewScreen can open
+            app.scan_results["id-1"] = ThoughtMetadata(visibility=["personal"])
+
+            # Tab to Review button and press enter (keyboard)
+            await pilot.press("tab")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # Verify ReviewScreen rendered: edit area, all 4 buttons
+            assert app.screen.query_one("#review-dialog")
+            assert app.screen.query_one("#edit-area", TextArea)
+            assert app.screen.query_one("#btn-save", Button)
+            assert app.screen.query_one("#btn-verify", Button)
+            assert app.screen.query_one("#btn-skip", Button)
+            assert app.screen.query_one("#btn-cancel", Button)
+            # Thought content visible in review
+            assert "Test thought one" in str(
+                app.screen.query_one("#thought-content", Static).content
+            )
+
+    @respx.mock
+    async def test_close_button_returns_to_main(self) -> None:
+        """enter → ThoughtDetailScreen → tab to Close+enter → main."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#main-table", DataTable)
+            assert table.row_count == 2
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # Detail screen rendered
+            assert app.screen.query_one("#detail-dialog")
+            assert app.screen.query_one("#btn-close", Button)
+
+            # Tab past Review to Close, then press enter
+            await pilot.press("tab", "tab")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # Back on main: table visible
+            assert len(app.screen_stack) == 1
+            table = app.query_one("#main-table", DataTable)
+            assert table.row_count == 2
+            assert app.query_one("#status-bar", Label)
+
+    # -- ReviewScreen button tests (navigate full flow) --
+
+    @respx.mock
+    async def test_save_button_returns_to_main(self) -> None:
+        """Full flow → ReviewScreen → Save → main with 'saved'."""
+        _mock_routes()
+        patch_route = respx.patch("https://test.supabase.co/rest/v1/thoughts").respond(
+            status_code=204
+        )
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.scan_results["id-1"] = ThoughtMetadata(visibility=["personal"])
+
+            # enter → detail → click Review → ReviewScreen
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen.query_one("#detail-content", Static)
+
+            await pilot.click("#btn-review")
+            await pilot.pause()
+            assert app.screen.query_one("#edit-area", TextArea)
+            assert app.screen.query_one("#btn-save", Button)
+
+            # click Save
+            await pilot.click("#btn-save")
+            await pilot.pause()
+
+            assert len(app.screen_stack) == 1
+            assert app.query_one("#main-table", DataTable).row_count == 2
+            assert patch_route.called
+            assert "saved" in _status_text(app)
+
+    @respx.mock
+    async def test_verify_button_returns_to_main(self) -> None:
+        """Full flow → ReviewScreen → Verify → main with 'verified'."""
+        _mock_routes()
+        patch_route = respx.patch("https://test.supabase.co/rest/v1/thoughts").respond(
+            status_code=204
+        )
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.scan_results["id-1"] = ThoughtMetadata(visibility=["personal"])
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen.query_one("#detail-content", Static)
+
+            await pilot.click("#btn-review")
+            await pilot.pause()
+            assert app.screen.query_one("#edit-area", TextArea)
+            assert app.screen.query_one("#btn-verify", Button)
+
+            await pilot.click("#btn-verify")
+            await pilot.pause()
+
+            assert len(app.screen_stack) == 1
+            assert app.query_one("#main-table", DataTable).row_count == 2
+            assert patch_route.called
+            assert "verified" in _status_text(app)
+
+    @respx.mock
+    async def test_skip_button_returns_to_main(self) -> None:
+        """Full flow → ReviewScreen → Skip → main table visible."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.scan_results["id-1"] = ThoughtMetadata(visibility=["personal"])
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen.query_one("#detail-content", Static)
+
+            await pilot.click("#btn-review")
+            await pilot.pause()
+            assert app.screen.query_one("#edit-area", TextArea)
+            assert app.screen.query_one("#btn-skip", Button)
+
+            await pilot.click("#btn-skip")
+            await pilot.pause()
+
+            assert len(app.screen_stack) == 1
+            assert app.query_one("#main-table", DataTable).row_count == 2
+
+    @respx.mock
+    async def test_cancel_button_returns_to_main(self) -> None:
+        """Full flow → ReviewScreen → Cancel → main table visible."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.scan_results["id-1"] = ThoughtMetadata(visibility=["personal"])
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen.query_one("#detail-content", Static)
+
+            await pilot.click("#btn-review")
+            await pilot.pause()
+            assert app.screen.query_one("#edit-area", TextArea)
+            assert app.screen.query_one("#btn-cancel", Button)
+
+            await pilot.click("#btn-cancel")
+            await pilot.pause()
+
+            assert len(app.screen_stack) == 1
+            assert app.query_one("#main-table", DataTable).row_count == 2
+
+    @respx.mock
+    async def test_detail_content_visible_small_terminal(self) -> None:
+        """Content should be visible at 19 lines via scrollable dialog."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(80, 19)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # The whole dialog should be scrollable
+            from textual.containers import VerticalScroll
+
+            app.screen.query_one("#detail-dialog", VerticalScroll)
+            # Content widget must exist and have height
+            content = app.screen.query_one("#detail-content", Static)
+            assert content.size.height > 0
