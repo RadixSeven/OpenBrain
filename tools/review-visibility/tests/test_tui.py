@@ -1063,3 +1063,113 @@ class TestTableNewlineCollapsing:
             narrow_content = str(table.get_row_at(0)[1])
 
             assert len(narrow_content) < len(wide_content)
+
+
+# ---------------------------------------------------------------------------
+# Column width / render tests
+# ---------------------------------------------------------------------------
+
+
+class TestColumnWidths:
+    @respx.mock
+    async def test_all_columns_visible_at_width_120(self) -> None:
+        """At width=120, all 5 column headers should be present."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#main-table", DataTable)
+            labels = [col.label.plain for col in table.columns.values()]
+            assert labels == ["Created", "Content", "Current Vis", "New Vis", "Status"]
+
+    @respx.mock
+    async def test_all_columns_visible_at_width_80(self) -> None:
+        """At width=80, all 5 column headers should be present."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(80, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#main-table", DataTable)
+            labels = [col.label.plain for col in table.columns.values()]
+            assert labels == ["Created", "Content", "Current Vis", "New Vis", "Status"]
+
+    @respx.mock
+    async def test_columns_fit_within_terminal_width(self) -> None:
+        """Sum of all column widths should not exceed terminal width."""
+        _mock_routes()
+        for term_width in (80, 100, 120, 200):
+            app = VisibilityReviewApp(config=FAKE_CONFIG)
+            async with app.run_test(size=(term_width, 40)) as pilot:
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                table = app.query_one("#main-table", DataTable)
+                total = sum(
+                    col.width for col in table.columns.values() if col.width is not None
+                )
+                assert total <= term_width, (
+                    f"columns total {total} > terminal {term_width}"
+                )
+
+    @respx.mock
+    async def test_resize_adjusts_column_widths(self) -> None:
+        """After resize, column widths change and still fit."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#main-table", DataTable)
+            wide_widths = [
+                col.width for col in table.columns.values() if col.width is not None
+            ]
+
+            await pilot.resize_terminal(80, 40)
+            await pilot.pause()
+            narrow_widths = [
+                col.width for col in table.columns.values() if col.width is not None
+            ]
+
+            assert narrow_widths != wide_widths
+            assert sum(narrow_widths) <= 80
+
+    @respx.mock
+    async def test_content_truncated_to_column_width(self) -> None:
+        """Content cell string length should not exceed content column width."""
+        _mock_routes()
+        long_content = "a" * 300
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(80, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.thoughts[0] = _thought(id="id-1", content=long_content)
+            app._populate_table()
+            table = app.query_one("#main-table", DataTable)
+            content_col_width = list(table.columns.values())[1].width
+            content_cell = str(table.get_row_at(0)[1])
+            assert len(content_cell) <= content_col_width + 1  # +1 for ellipsis char
+
+    @respx.mock
+    async def test_visibility_truncated_to_column_width(self) -> None:
+        """Long visibility strings should be truncated to vis column width."""
+        _mock_routes()
+        long_vis = [
+            "family_relationship",
+            "romantic_or_sexual_relationship",
+            "personal",
+            "lgbtq_identity",
+        ]
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(80, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app.thoughts[0] = _thought(id="id-1", visibility=long_vis)
+            app._populate_table()
+            table = app.query_one("#main-table", DataTable)
+            vis_col_width = list(table.columns.values())[2].width
+            vis_cell = str(table.get_row_at(0)[2])
+            assert len(vis_cell) <= vis_col_width
+            assert vis_cell.endswith("\u2026")

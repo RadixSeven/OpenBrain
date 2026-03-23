@@ -731,12 +731,23 @@ class VisibilityReviewApp(App[None]):
     def _populate_table(self, *, width_override: int | None = None) -> None:
         table = self.query_one("#main-table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Created", "Content", "Current Vis", "New Vis", "Status")
         table.cursor_type = "row"
 
-        # Other columns: Created(10) + Vis(~20) + NewVis(~20) + Status(8) + seps ≈ 70
         width = width_override if width_override is not None else self.size.width
-        content_max = max(20, width - 70)
+        # Fixed-width columns: Created(10) + Status(8) + cell padding (2*5) + separators
+        fixed = 10 + 8 + 10 + 6  # = 34
+        remaining = max(0, width - fixed)
+        # Split remaining: Content ~50%, Current Vis and New Vis ~25% each
+        content_w = max(20, remaining * 50 // 100)
+        vis_w = max(10, remaining * 25 // 100)
+
+        table.add_column("Created", width=10)
+        table.add_column("Content", width=content_w)
+        table.add_column("Current Vis", width=vis_w)
+        table.add_column("New Vis", width=vis_w)
+        table.add_column("Status", width=8)
+
+        content_max = content_w
 
         for t in self.thoughts:
             old_vis = sorted(t.metadata.visibility)
@@ -756,11 +767,18 @@ class VisibilityReviewApp(App[None]):
             else:
                 row_status = "\u2014"
 
+            old_vis_str = ", ".join(old_vis)
+            if len(old_vis_str) > vis_w:
+                old_vis_str = old_vis_str[: vis_w - 1] + "\u2026"
+
             new_vis_str = ", ".join(new_vis) if t.id in self.scan_results else "\u2014"
+            if len(new_vis_str) > vis_w:
+                new_vis_str = new_vis_str[: vis_w - 1] + "\u2026"
+
             table.add_row(
                 created,
                 content,
-                ", ".join(old_vis),
+                old_vis_str,
                 new_vis_str,
                 row_status,
                 key=t.id,
