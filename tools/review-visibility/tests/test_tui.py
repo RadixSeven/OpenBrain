@@ -1173,3 +1173,157 @@ class TestColumnWidths:
             vis_cell = str(table.get_row_at(0)[2])
             assert len(vis_cell) <= vis_col_width
             assert vis_cell.endswith("\u2026")
+
+
+# ---------------------------------------------------------------------------
+# Keybinding integration tests (pilot.press)
+# ---------------------------------------------------------------------------
+
+
+class TestKeybindings:
+    """All tests use pilot.press() to exercise the real input path."""
+
+    @respx.mock
+    async def test_enter_key_opens_detail_screen(self) -> None:
+        """Pressing enter opens ThoughtDetailScreen for selected row."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.screen_stack) > 1
+            assert isinstance(app.screen_stack[-1], ThoughtDetailScreen)
+
+    @respx.mock
+    async def test_s_key_triggers_scan(self, tmp_path: Path) -> None:
+        """Pressing s triggers a scan."""
+        _mock_routes()
+        respx.post("https://openrouter.ai/api/v1/chat/completions").respond(
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "visibility": ["sfw"],
+                                    "type": "observation",
+                                    "topics": [],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        app.cache_path = tmp_path / "cache.json"
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.press("s")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert "Scan done" in _status_text(app)
+
+    @respx.mock
+    async def test_a_key_reviews_all_diffs(self) -> None:
+        """Pressing a with no diffs shows 'No more diffs'."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+            assert "No more diffs" in _status_text(app)
+
+    @respx.mock
+    async def test_r_key_refreshes(self) -> None:
+        """Pressing r re-fetches data."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Clear thoughts, then press r to refresh
+            app.thoughts = []
+            app._populate_table()
+            table = app.query_one("#main-table", DataTable)
+            assert table.row_count == 0
+
+            await pilot.press("r")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#main-table", DataTable)
+            assert table.row_count == 2
+
+    @respx.mock
+    async def test_c_key_clears_cache(self) -> None:
+        """Pressing c clears scan results and shows 'Cache cleared'."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.scan_results = {
+                "id-1": ThoughtMetadata(visibility=["sfw"]),
+            }
+            await pilot.press("c")
+            await pilot.pause()
+            assert app.scan_results == {}
+            assert "Cache cleared" in _status_text(app)
+
+    @respx.mock
+    async def test_q_key_quits(self) -> None:
+        """Pressing q exits the app."""
+        _mock_routes()
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.press("q")
+            await pilot.pause()
+            assert not app.is_running
+
+    @respx.mock
+    async def test_escape_dismisses_review_screen(self) -> None:
+        """Pressing escape on ReviewScreen dismisses with None."""
+        _mock_routes()
+        results: list[str | None] = []
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            def capture(result: str | None) -> None:
+                results.append(result)
+
+            thought = _thought()
+            screen = ReviewScreen(
+                thought, ThoughtMetadata(visibility=["sfw"]), [], FAKE_CONFIG
+            )
+            app.push_screen(screen, callback=capture)
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [None]
+
+    async def test_escape_dismisses_detail_screen(self) -> None:
+        """Pressing escape on ThoughtDetailScreen dismisses with None."""
+        results: list[str | None] = []
+        app = VisibilityReviewApp(config=FAKE_CONFIG)
+        with patch.object(app, "_load_data"):
+            async with app.run_test(size=(120, 40)) as pilot:
+
+                def capture(result: str | None) -> None:
+                    results.append(result)
+
+                thought = _thought()
+                screen = ThoughtDetailScreen(thought, None, [], FAKE_CONFIG)
+                app.push_screen(screen, callback=capture)
+                await pilot.pause()
+                await pilot.press("escape")
+                await pilot.pause()
+                assert results == [None]

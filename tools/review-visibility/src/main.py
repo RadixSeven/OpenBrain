@@ -661,7 +661,7 @@ class VisibilityReviewApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
         Binding("s", "scan", "Scan for diffs"),
-        Binding("enter", "review_selected", "Review"),
+        Binding("enter", "review_selected", "Review", priority=True),
         Binding("a", "review_all", "Review all diffs"),
         Binding("r", "refresh", "Refresh list"),
         Binding("c", "clear_cache", "Clear cache"),
