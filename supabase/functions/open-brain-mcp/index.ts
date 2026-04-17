@@ -293,11 +293,10 @@ app.all("*", async (c) => {
           }[])
               .map((t, i) => {
                 const meta = t.metadata || {};
-                const date = new Date(t.created_at).toLocaleDateString();
                 const tags = Array.isArray(meta.topics)
                     ? (meta.topics as string[]).join(", ")
                     : "";
-                let entry = `${i + 1}. [${date}] (${meta.type || "??"}${tags ? " — " + tags : ""}) [by: ${t.submitted_by}]\n   ${t.content}`;
+                let entry = `${i + 1}. [${t.created_at}] (${meta.type || "??"}${tags ? " — " + tags : ""}) [by: ${t.submitted_by}]\n   ${t.content}`;
                 if (
                     t.evidence_basis &&
                     t.evidence_basis !== "user typed in web form"
