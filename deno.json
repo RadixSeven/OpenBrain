@@ -1,0 +1,6 @@
+{
+  "workspace": [
+    "./supabase/functions/capture-api",
+    "./supabase/functions/open-brain-mcp"
+  ]
+}
