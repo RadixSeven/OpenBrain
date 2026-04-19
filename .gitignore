@@ -334,3 +334,7 @@ project/tmp*/
 /refs
 /hooks
 /config
+
+# Supabase CLI local state
+supabase/.branches/
+supabase/.temp/
