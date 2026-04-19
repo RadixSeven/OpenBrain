@@ -5,13 +5,15 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import type {Database, Json} from "../_shared/database.types.ts";
+
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
@@ -92,6 +94,33 @@ async function applyTagRules(visibility: string[]): Promise<string[]> {
   return result;
 }
 
+type JsonObj = { [key: string]: Json | undefined }
+
+/**
+ * Convert a given JSON value into a JSON object.
+ *
+ * Return an empty object if the input is not a valid JSON object.
+ *
+ * @param {Json} j - The input JSON value to be evaluated and converted.
+ * @return {JsonObj} The input value as a JSON object if it is a non-array object,
+ *     or an empty object otherwise.
+ */
+function asObject(j: Json): JsonObj {
+  return j && typeof j === "object" && !Array.isArray(j) ? j : {};
+}
+
+type KeyRecord = {
+  filters: Json
+  key_id: string
+  key_name: string
+}
+
+type ThoughtsRow = Database["public"]["Tables"]["thoughts"]["Row"]
+
+type PostgrestSingleResponse<T> =
+    | { data: T;    error: null }          // success
+    | { data: null; error: Error } // failure
+
 // --- Hono app with auth middleware ---
 
 const app = new Hono().basePath("/open-brain-mcp");
@@ -105,7 +134,7 @@ app.all("*", async (c) => {
     return c.json({ error: "Missing x-brain-key header or ?key= param" }, 401);
   }
 
-  const { data: keyData, error: keyError } = await supabase.rpc(
+  const { data: keyData, error: keyError }: PostgrestSingleResponse<KeyRecord[]> = await supabase.rpc(
       "validate_access_key",
       { raw_key: brainKey }
   );
@@ -115,8 +144,12 @@ app.all("*", async (c) => {
   }
 
   const keyRecord = keyData[0];
-  const keyFilters = keyRecord.filters || {};
-  const visFilter: string[] | null = keyFilters.visibility || null;
+
+  const rawFilters = keyRecord.filters;
+  const filtersVisField = asObject(rawFilters).visibility;
+  const visFilter= Array.isArray(filtersVisField)
+      ? (filtersVisField.filter((v): v is string => typeof v === "string"))
+      : undefined;
 
   // 2. Create an MCP server scoped to this key's permissions
   const server = new McpServer({
@@ -148,7 +181,7 @@ app.all("*", async (c) => {
         },
       },
       async ({ query, threshold, count }) => {
-        const embedding = await getEmbedding(query);
+        const embedding = JSON.stringify(await getEmbedding(query));
 
         const { data, error } = await supabase.rpc("match_thoughts", {
           query_embedding: embedding,
@@ -180,12 +213,12 @@ app.all("*", async (c) => {
                 (t: {
                   content: string;
                   similarity: number;
-                  metadata: Record<string, unknown>;
+                  metadata: Json;
                   submitted_by: string;
                   evidence_basis: string;
                   created_at: string;
                 }) => {
-                  const meta = t.metadata || {};
+                  const meta = asObject(t.metadata);
                   const date = new Date(t.created_at).toLocaleDateString();
                   let entry = `[${date} | similarity: ${t.similarity.toFixed(2)} | by: ${t.submitted_by}]\n${t.content}`;
                   if (t.evidence_basis && t.evidence_basis !== "user typed in web form")
@@ -252,11 +285,11 @@ app.all("*", async (c) => {
               "list_thoughts_filtered",
               {
                 result_count: count || 10,
-                filter_type: type || null,
-                filter_topic: topic || null,
-                filter_person: person || null,
-                filter_days: days || null,
-                content_pattern: pattern || null,
+                filter_type: type || undefined,
+                filter_topic: topic || undefined,
+                filter_person: person || undefined,
+                filter_days: days || undefined,
+                content_pattern: pattern || undefined,
                 visibility_filter: visFilter,
               }
           );
@@ -286,13 +319,13 @@ app.all("*", async (c) => {
 
           const results = (data as {
             content: string;
-            metadata: Record<string, unknown>;
+            metadata: Json;
             submitted_by: string;
             evidence_basis: string;
             created_at: string;
           }[])
               .map((t, i) => {
-                const meta = t.metadata || {};
+                const meta = asObject(t.metadata);
                 const tags = Array.isArray(meta.topics)
                     ? (meta.topics as string[]).join(", ")
                     : "";
@@ -360,7 +393,7 @@ app.all("*", async (c) => {
             );
           }
 
-          const { data, error } = await query;
+          const { data, error }: PostgrestSingleResponse<Pick<ThoughtsRow, "metadata" | "created_at">[]> = await query;
 
           if (error) {
             return {
@@ -408,12 +441,15 @@ app.all("*", async (c) => {
                   .sort((a, b) => b[1] - a[1])
                   .slice(0, 10);
 
-          const oldest = data[data.length - 1].created_at;
-          const newest = data[0].created_at;
+          const oldest: string | null = data[data.length - 1].created_at;
+          const newest: string | null = data[0].created_at;
 
           const lines: string[] = [
             `Total thoughts: ${total}`,
-            `Date range: ${new Date(oldest).toLocaleDateString()} → ${new Date(newest).toLocaleDateString()}`,
+            ...(oldest && newest
+                ? [`Date range: ${new Date(oldest).toLocaleDateString()} → ${new
+                Date(newest).toLocaleDateString()}`]
+                : []),
             "",
             "Types:",
             ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
@@ -472,7 +508,7 @@ app.all("*", async (c) => {
       async ({ content, evidence_basis }) => {
         try {
           const [embedding, metadata] = await Promise.all([
-            getEmbedding(content),
+            JSON.stringify(getEmbedding(content)),
             extractMetadata(content),
           ]);
 
