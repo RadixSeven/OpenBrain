@@ -374,3 +374,7 @@ export const Constants = {
   },
 } as const
 
+// The below hash is used to detect whether the types have
+// diverged from the database schemas represented by the
+// migrations directory
+// migrations-hash: 63210d06fba7a7ac2cb178251413f2875af19e35c33c67b11f7bded3d82b72af
